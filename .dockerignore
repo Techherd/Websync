@@ -1,0 +1,42 @@
+# Node modules
+node_modules
+**/node_modules
+
+# Git
+.git
+.gitignore
+
+# Development files
+*.md
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Build artifacts
+dist
+*.log
+
+# Test files
+*.test.ts
+*.spec.ts
+__tests__
+coverage
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Database (will be created fresh)
+*.db
+*.db-journal
+
+# OS files
+.DS_Store
+Thumbs.db

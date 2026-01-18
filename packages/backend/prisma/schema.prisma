@@ -1,0 +1,126 @@
+generator client {
+  provider = "prisma-client-js"
+  // Native for local dev, linux-musl for Alpine Docker (amd64 for Unraid deployment)
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Site {
+  id              String   @id @default(uuid())
+  label           String
+  localPath       String
+  remotePath      String
+  
+  // Site type for icons and special features
+  siteType        String   @default("custom")  // wordpress, laravel, static, node, custom
+  
+  // WordPress-specific settings
+  wpContainer     String?  // Container running WordPress/PHP for WP-CLI
+  wpPath          String?  // Path to WordPress inside container (default: /var/www/html)
+  
+  // Quick links
+  editorUrl       String?  // URL to code editor (e.g., https://edit.domain.com)
+  siteUrl         String?  // URL to the live site (e.g., https://domain.com)
+  wpAdminUrl      String?  // URL to WordPress admin (e.g., https://domain.com/wp-admin)
+  
+  // Local Docker containers (restart after local changes)
+  dockerContainers String?  // Comma-separated container names
+  
+  // Local database sync
+  dbContainer     String?
+  dbType          String?  // mysql, postgres
+  dbUser          String?
+  dbPassword      String?
+  dbName          String?
+  
+  // Remote Docker containers (start/stop on remote server)
+  remoteContainers String?  // Comma-separated container names to manage on remote
+  autoStartRemote  Boolean  @default(false)  // Auto-start containers after successful sync
+  
+  // Remote database (for importing dumps on remote)
+  remoteDbContainer String?  // Container name on remote for DB import
+  remoteDbUser      String?
+  remoteDbPassword  String?
+  remoteDbName      String?
+  
+  schedule        String?  // Cron expression
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  jobs            Job[]
+}
+
+model Job {
+  id        String   @id @default(uuid())
+  siteId    String
+  site      Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  type      String   // SYNC_FILE, SYNC_DB, FULL_SYNC, SCHEDULED_SYNC
+  status    String   // PENDING, RUNNING, COMPLETED, FAILED
+  logs      String?
+  progress  Int?     // 0-100 percentage
+  startedAt DateTime @default(now())
+  endedAt   DateTime?
+}
+
+// Tracks sites synced TO this server from a remote source (read-only display)
+model ReceivedSite {
+  id              String   @id @default(uuid())
+  
+  // Source server info
+  sourceServerId  String   // ID from the source server's Site record
+  sourceServerName String  // Friendly name of the source server
+  sourceServerUrl String?  // API URL of source server for reference
+  
+  // Site info (mirrored from source)
+  label           String
+  localPath       String   // Path on THIS server where files are synced
+  siteType        String   @default("custom")
+  siteUrl         String?  // URL to the live site
+  
+  // Sync tracking
+  lastSyncAt      DateTime?
+  lastSyncStatus  String?  // COMPLETED, FAILED
+  lastSyncLogs    String?
+  filesCount      Int?     // Number of files synced
+  totalSize       String?  // Human-readable size (e.g., "1.2 GB")
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@unique([sourceServerId])  // One entry per source site
+}
+
+model Settings {
+  id           String   @id @default("default")
+  
+  // Local server identity
+  serverName   String   @default("Primary")  // Friendly name for this server
+  serverRole   String   @default("primary")  // primary, secondary, or peer
+  
+  // Remote server connection
+  remoteHost   String   // SSH host (e.g., user@192.168.1.100)
+  remotePort   Int      @default(22)
+  sshKeyPath   String?  // Path to SSH private key
+  
+  // Remote WebSync API (for health checks and bidirectional sync)
+  remoteApiUrl String?  // e.g., http://192.168.1.100:3000
+  remoteApiToken String? // Shared secret for API auth between servers
+  
+  // Sync configuration
+  syncDirection String  @default("push")  // push, pull, bidirectional
+  syncOnlyWhenHealthy Boolean @default(true)  // Only sync if remote is reachable
+  
+  // Health check settings
+  healthCheckInterval Int @default(30)  // Seconds between health checks
+  lastHealthCheck DateTime?
+  remoteHealthy Boolean @default(false)
+  
+  // UI preferences
+  hideBranding Boolean @default(false)  // Hide "Powered by Techherd" footer
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}

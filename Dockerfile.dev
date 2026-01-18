@@ -1,0 +1,28 @@
+# WebSync Development Dockerfile
+
+# Backend development stage
+FROM node:20-alpine AS backend
+
+RUN apk add --no-cache rsync openssh-client
+
+WORKDIR /app
+COPY packages/backend/package*.json ./
+RUN npm install
+
+COPY packages/backend/ ./
+RUN npx prisma generate
+
+EXPOSE 3000
+CMD ["npm", "run", "dev"]
+
+# Frontend development stage
+FROM node:20-alpine AS frontend
+
+WORKDIR /app
+COPY packages/frontend/package*.json ./
+RUN npm install
+
+COPY packages/frontend/ ./
+
+EXPOSE 5173
+CMD ["npm", "run", "dev", "--", "--host"]

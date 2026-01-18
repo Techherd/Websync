@@ -1,0 +1,47 @@
+# WebSync Self-Hosted Docker Compose
+# For deployment on Unraid or any Docker-compatible system
+
+version: '3.8'
+
+services:
+  websync:
+    build: .
+    image: websync:latest
+    container_name: websync
+    restart: unless-stopped
+    ports:
+      - "${WEBSYNC_PORT:-3000}:3000"
+    environment:
+      # Authentication - CHANGE THESE IN PRODUCTION!
+      - AUTH_PASSWORD=${AUTH_PASSWORD:-changeme}
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-change-this}
+      # Database
+      - DATABASE_URL=file:/data/websync.db
+      # Production mode
+      - NODE_ENV=production
+    volumes:
+      # Persistent database storage
+      - websync-data:/data
+      # Docker socket for container operations (local)
+      - /var/run/docker.sock:/var/run/docker.sock
+      # SSH keys for rsync to remote host
+      - ${SSH_KEY_PATH:-/root/.ssh}:/root/.ssh:ro
+      # Mount your app data directories that need syncing
+      # Modify these based on your Unraid setup:
+      - /mnt/user/appdata:/mnt/user/appdata
+    networks:
+      - websync-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  websync-data:
+    name: websync-data
+
+networks:
+  websync-network:
+    name: websync-network

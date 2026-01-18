@@ -1,0 +1,47 @@
+# WebSync - Docker Hub Deployment
+# Use this file on remote servers to pull from Docker Hub
+#
+# Usage:
+#   1. Copy this file and .env to your server
+#   2. Update DOCKER_HUB_IMAGE in .env with your Docker Hub username
+#   3. Run: docker compose -f docker-compose.hub.yml up -d
+
+version: '3.8'
+
+services:
+  websync:
+    image: ${DOCKER_HUB_IMAGE:-your-username/websync}:${WEBSYNC_VERSION:-latest}
+    container_name: websync
+    restart: unless-stopped
+    ports:
+      - "${WEBSYNC_PORT:-3000}:3000"
+    environment:
+      - AUTH_PASSWORD=${AUTH_PASSWORD:?AUTH_PASSWORD is required}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - DATABASE_URL=file:/data/websync.db
+      - NODE_ENV=production
+    volumes:
+      # Persistent database storage
+      - websync-data:/data
+      # Docker socket for container operations
+      - /var/run/docker.sock:/var/run/docker.sock
+      # SSH keys for rsync to remote host
+      - ${SSH_KEY_PATH:-/root/.ssh}:/root/.ssh:ro
+      # Mount your app data directories that need syncing
+      - /mnt/user/appdata:/mnt/user/appdata
+    networks:
+      - websync-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  websync-data:
+    name: websync-data
+
+networks:
+  websync-network:
+    name: websync-network

@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>WebSync</Name>
+  <Repository>althe3rd/websync:latest</Repository>
+  <Registry>https://hub.docker.com/r/YOUR_DOCKERHUB_USERNAME/websync</Registry>
+  <Branch>
+    <Tag>latest</Tag>
+    <TagDescription>Latest stable release</TagDescription>
+  </Branch>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/althe3rd/websync-self-hosted</Project>
+  <Overview>WebSync - Self-hosted file and database synchronization between Unraid servers. Supports bidirectional sync, scheduled jobs, remote container management, and health monitoring.</Overview>
+  <Category>Backup: Tools:</Category>
+  <WebUI>http://[IP]:[PORT:3000]/</WebUI>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/svg/syncthing.svg</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled></DateInstalled>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="Web UI Port" Target="3000" Default="3000" Mode="tcp" Description="WebSync web interface port" Type="Port" Display="always" Required="true" Mask="false">3000</Config>
+  <Config Name="Password" Target="AUTH_PASSWORD" Default="changeme" Mode="" Description="Login password for WebSync. CHANGE THIS!" Type="Variable" Display="always" Required="true" Mask="true">changeme</Config>
+  <Config Name="JWT Secret" Target="JWT_SECRET" Default="" Mode="" Description="Secret key for session tokens. Generate with: openssl rand -base64 32" Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Data Path" Target="/data" Default="/mnt/user/appdata/websync" Mode="rw" Description="Path to store WebSync database" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/websync</Config>
+  <Config Name="SSH Keys" Target="/root/.ssh" Default="/root/.ssh" Mode="ro" Description="Path to SSH keys for rsync connections" Type="Path" Display="always" Required="true" Mask="false">/root/.ssh</Config>
+  <Config Name="Appdata" Target="/mnt/user/appdata" Default="/mnt/user/appdata" Mode="rw" Description="Path to appdata folder (sites to sync)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata</Config>
+  <Config Name="Docker Socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="rw" Description="Docker socket for container management" Type="Path" Display="advanced" Required="false" Mask="false">/var/run/docker.sock</Config>
+</Container>
