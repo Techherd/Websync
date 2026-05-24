@@ -248,9 +248,34 @@ const wpRotatePassword = async () => {
     }
 };
 
-const copyToClipboard = (text: string, label: string) => {
-    navigator.clipboard.writeText(text);
-    success('Copied', `${label} copied to clipboard`);
+const copyToClipboard = async (text: string, label: string) => {
+    // navigator.clipboard requires a secure context (HTTPS or localhost).
+    // WebSync is usually accessed over plain HTTP on a LAN, so fall back to
+    // the legacy textarea + execCommand trick.
+    const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch { ok = false; }
+        document.body.removeChild(ta);
+        return ok;
+    };
+
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+        } else if (!fallback()) {
+            throw new Error('Copy failed');
+        }
+        success('Copied', `${label} copied to clipboard`);
+    } catch {
+        error('Copy failed', 'Select the value manually to copy it');
+    }
 };
 
 

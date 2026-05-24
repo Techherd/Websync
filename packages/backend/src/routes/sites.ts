@@ -4,7 +4,7 @@ import { syncFiles, syncDatabase, canSync, SyncDirection, notifyRemoteOfSync } f
 import prisma from '../lib/prisma';
 import { refreshScheduler } from '../lib/scheduler';
 import { broadcastJobUpdate } from '../lib/websocket';
-import { generateWpAdmin, deleteWpAdmin, generateMagicLoginUrl } from '../lib/docker';
+import { generateWpAdmin, deleteWpAdmin, generateMagicLoginUrl, executeCommand } from '../lib/docker';
 import { encrypt, decrypt } from '../lib/crypto';
 import { logAudit } from '../lib/audit';
 import { runHealthCheckCycle } from '../lib/healthMonitor';
@@ -453,7 +453,9 @@ export default async function siteRoutes(server: FastifyInstance) {
         };
     });
 
-    // Generate a one-time magic login URL for the stored WP admin
+    // Generate a one-time magic login URL for the stored WP admin.
+    // If no stored credential exists yet (and no websync_admin user in WP),
+    // bootstrap one transparently so the first click "just works".
     server.post('/sites/:id/wp-admin/login', async (request, reply) => {
         const { id } = request.params as { id: string };
         const site = await prisma.site.findUnique({
@@ -464,8 +466,51 @@ export default async function siteRoutes(server: FastifyInstance) {
         if (!site.wpContainer) {
             return reply.status(400).send({ error: 'WordPress container not configured.' });
         }
-        const username = site.wpCredential?.username || 'websync_admin';
-        const result = await generateMagicLoginUrl(site.wpContainer, username, site.wpPath || '/var/www/html');
+
+        let username = site.wpCredential?.username || 'websync_admin';
+        const wpPath = site.wpPath || '/var/www/html';
+
+        // Verify the stored username actually exists in WP — guards against drift
+        // from earlier defaults (e.g. legacy `websync_admin_<suffix>` users that
+        // were never recorded in our DB).
+        let needsRediscover = !site.wpCredential;
+        if (site.wpContainer && site.wpCredential) {
+            try {
+                const check = await executeCommand(site.wpContainer, [
+                    'sh', '-c',
+                    `cd ${wpPath} && wp user get "${username}" --field=ID --allow-root 2>/dev/null || echo "missing"`
+                ]);
+                if (!/^\d+$/.test(check.trim())) {
+                    needsRediscover = true;
+                }
+            } catch {
+                needsRediscover = true;
+            }
+        }
+
+        if (needsRediscover) {
+            const created = await generateWpAdmin(site.wpContainer, wpPath);
+            if (!created.success || !created.username || !created.password) {
+                return reply.status(500).send({ error: created.error, debug: created.debug });
+            }
+            username = created.username;
+            await prisma.wpAdminCredential.upsert({
+                where: { siteId: site.id },
+                create: {
+                    siteId: site.id,
+                    username: created.username,
+                    password: encrypt(created.password)
+                },
+                update: {
+                    username: created.username,
+                    password: encrypt(created.password),
+                    lastRotated: new Date()
+                }
+            });
+            await logAudit(request, 'wp.rotatePassword', site.id, { username, autoCreated: !site.wpCredential });
+        }
+
+        const result = await generateMagicLoginUrl(site.wpContainer, username, wpPath);
         if (!result.success || !result.url) {
             return reply.status(500).send({ error: result.error, debug: result.debug });
         }

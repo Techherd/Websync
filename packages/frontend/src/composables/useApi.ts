@@ -42,9 +42,13 @@ export function useApi() {
         }
         
         const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
             ...(options.headers as Record<string, string> || {})
         };
+        // Only declare JSON content-type when there is actually a body — otherwise
+        // Fastify tries to parse an empty body as JSON and rejects with 400.
+        if (options.body != null) {
+            headers['Content-Type'] = 'application/json';
+        }
 
         if (token.value) {
             headers['Authorization'] = `Bearer ${token.value}`;
@@ -159,7 +163,10 @@ export function useApi() {
     });
 
     // Users
-    const getMe = () => request<{ id: string; email: string; name: string; role: string }>('/users/me');
+    const getMe = () => request<{
+        id: string; email: string; name: string; role: string;
+        createdAt: string; lastLoginAt: string | null;
+    }>('/users/me');
     const getUsers = () => request<any[]>('/users');
     const createUser = (data: { email: string; name: string; password: string; role?: string }) =>
         request<any>('/users', { method: 'POST', body: JSON.stringify(data) });

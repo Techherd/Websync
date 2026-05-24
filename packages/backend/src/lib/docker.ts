@@ -249,9 +249,16 @@ export const generateMagicLoginUrl = async (
 
         const url = magic.split('\n').map(s => s.trim()).find(s => /^https?:\/\//.test(s));
         if (!url) {
+            // Strip the noisy PHP Warning/Notice lines so the real error shows up.
+            const realError = magic
+                .split('\n')
+                .map(s => s.trim())
+                .filter(s => s && !/^(\[[^\]]+\]\s+)?(PHP\s+)?(Warning|Notice|Deprecated):/i.test(s) && !/^Warning:/i.test(s))
+                .join('\n')
+                .trim() || magic.trim();
             return {
                 success: false,
-                error: `Could not generate magic link. Output: ${magic.trim()}`,
+                error: `Could not generate magic link: ${realError}`,
                 debug: logs.join('\n')
             };
         }
