@@ -74,11 +74,11 @@ export function useApi() {
     };
 
     // Auth
-    const login = async (password: string) => {
-        const data = await request<{ token: string }>('/auth/login', {
-            method: 'POST',
-            body: JSON.stringify({ password })
-        });
+    const login = async (email: string, password: string) => {
+        const data = await request<{ token: string; user?: { id: string; email: string; name: string; role: string } }>(
+            '/auth/login',
+            { method: 'POST', body: JSON.stringify({ email, password }) }
+        );
         setToken(data.token);
         return data;
     };
@@ -153,10 +153,36 @@ export function useApi() {
 
     // Received Sites (read-only synced sites from remote)
     const getReceivedSites = () => request<any[]>('/received-sites');
-    
+
     const deleteReceivedSite = (id: string) => request<{ success: boolean }>(`/received-sites/${id}`, {
         method: 'DELETE'
     });
+
+    // Users
+    const getMe = () => request<{ id: string; email: string; name: string; role: string }>('/users/me');
+    const getUsers = () => request<any[]>('/users');
+    const createUser = (data: { email: string; name: string; password: string; role?: string }) =>
+        request<any>('/users', { method: 'POST', body: JSON.stringify(data) });
+    const updateUser = (id: string, data: { name?: string; role?: string; password?: string }) =>
+        request<any>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+    const deleteUser = (id: string) =>
+        request<{ success: boolean }>(`/users/${id}`, { method: 'DELETE' });
+    const changeOwnPassword = (currentPassword: string, newPassword: string) =>
+        request<{ success: boolean }>('/auth/change-password', {
+            method: 'POST',
+            body: JSON.stringify({ currentPassword, newPassword })
+        });
+
+    // Audit
+    const getAudit = (params?: { siteId?: string; userId?: string; limit?: number; offset?: number }) => {
+        const query = new URLSearchParams();
+        if (params?.siteId) query.set('siteId', params.siteId);
+        if (params?.userId) query.set('userId', params.userId);
+        if (params?.limit) query.set('limit', String(params.limit));
+        if (params?.offset) query.set('offset', String(params.offset));
+        const qs = query.toString();
+        return request<{ total: number; events: any[] }>(`/audit${qs ? `?${qs}` : ''}`);
+    };
 
     return {
         // Auth
@@ -188,7 +214,18 @@ export function useApi() {
         // Received Sites
         getReceivedSites,
         deleteReceivedSite,
-        
+
+        // Users
+        getMe,
+        getUsers,
+        createUser,
+        updateUser,
+        deleteUser,
+        changeOwnPassword,
+
+        // Audit
+        getAudit,
+
         // Generic
         request
     };

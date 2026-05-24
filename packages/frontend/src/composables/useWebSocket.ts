@@ -15,13 +15,24 @@ const getWsBase = () => {
 
 const WS_BASE = getWsBase();
 
+export interface SiteHealthPayload {
+    status: 'up' | 'degraded' | 'down' | 'unknown';
+    httpStatus: number | null;
+    responseMs: number | null;
+    sslExpiresAt: string | null;
+    error: string | null;
+    lastCheckedAt: string | null;
+}
+
 export interface JobUpdate {
-    type: 'connected' | 'pong' | 'job:started' | 'job:progress' | 'job:completed' | 'job:failed';
+    type: 'connected' | 'pong' | 'job:started' | 'job:progress' | 'job:completed' | 'job:failed' | 'site:health';
     job?: any;
     jobId?: string;
     progress?: number;
     message?: string;
     error?: string;
+    siteId?: string;
+    health?: SiteHealthPayload;
 }
 
 type JobUpdateHandler = (update: JobUpdate) => void;

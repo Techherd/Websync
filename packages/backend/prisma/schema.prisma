@@ -51,6 +51,72 @@ model Site {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   jobs            Job[]
+  wpCredential    WpAdminCredential?
+  health          SiteHealth?
+}
+
+// Per-site uptime / SSL monitoring
+model SiteHealth {
+  id            String   @id @default(uuid())
+  siteId        String   @unique
+  site          Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  status        String   @default("unknown")  // up | degraded | down | unknown
+  httpStatus    Int?
+  responseMs    Int?
+  sslExpiresAt  DateTime?
+  error         String?
+  lastCheckedAt DateTime?
+  updatedAt     DateTime @updatedAt
+}
+
+// Dashboard user account
+model User {
+  id           String       @id @default(uuid())
+  email        String       @unique
+  passwordHash String
+  name         String
+  role         String       @default("owner")     // owner | viewer (reserved)
+  createdAt    DateTime     @default(now())
+  lastLoginAt  DateTime?
+  sessions     Session[]
+  auditEvents  AuditEvent[]
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  userAgent String?
+  ip        String?
+  @@index([expiresAt])
+}
+
+// Audit trail of who did what
+model AuditEvent {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String   // e.g. "site.sync", "wp.rotatePassword", "wp.login", "site.create"
+  siteId    String?
+  metadata  String?  // JSON
+  createdAt DateTime @default(now())
+  @@index([createdAt])
+  @@index([siteId])
+}
+
+// Persistent WordPress admin credentials managed by WebSync
+// Password is AES-256-GCM encrypted at rest (see lib/crypto.ts)
+model WpAdminCredential {
+  id          String   @id @default(uuid())
+  siteId      String   @unique
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  username    String
+  password    String   // encrypted (base64 of iv||tag||ciphertext)
+  lastRotated DateTime @default(now())
+  createdAt   DateTime @default(now())
 }
 
 model Job {

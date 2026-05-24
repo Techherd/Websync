@@ -10,6 +10,7 @@ const { login } = useApi();
 // Initialize theme system
 useTheme();
 
+const email = ref('');
 const password = ref('');
 const error = ref('');
 const loading = ref(false);
@@ -17,12 +18,12 @@ const loading = ref(false);
 const handleSubmit = async () => {
     error.value = '';
     loading.value = true;
-    
+
     try {
-        await login(password.value);
+        await login(email.value.trim(), password.value);
         router.push('/');
     } catch (e: any) {
-        error.value = e.message || 'Invalid password';
+        error.value = e.message || 'Invalid email or password';
     } finally {
         loading.value = false;
     }
@@ -50,22 +51,40 @@ const handleSubmit = async () => {
 
                 <form @submit.prevent="handleSubmit" class="login-form">
                     <div class="form-group">
+                        <label for="email" class="form-label">Email</label>
+                        <div class="input-wrapper">
+                            <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                                <polyline points="22,6 12,13 2,6"/>
+                            </svg>
+                            <input
+                                id="email"
+                                v-model="email"
+                                type="email"
+                                class="form-input"
+                                placeholder="you@example.com"
+                                required
+                                autofocus
+                            />
+                        </div>
+                    </div>
+                    <div class="form-group">
                         <label for="password" class="form-label">Password</label>
                         <div class="input-wrapper">
                             <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
                                 <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                             </svg>
-                            <input 
+                            <input
                                 id="password"
-                                v-model="password" 
-                                type="password" 
+                                v-model="password"
+                                type="password"
                                 class="form-input"
                                 placeholder="Enter your password"
                                 required
-                                autofocus
                             />
                         </div>
+                        <p class="form-hint">First time? Enter any email — your AUTH_PASSWORD becomes the password and a new owner account is created with this email.</p>
                     </div>
 
                     <div v-if="error" class="error-message">
@@ -189,6 +208,13 @@ const handleSubmit = async () => {
     font-size: var(--text-sm);
     font-weight: var(--font-medium);
     color: var(--text-primary);
+}
+
+.form-hint {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    margin-top: var(--space-1);
+    line-height: 1.4;
 }
 
 .input-wrapper {

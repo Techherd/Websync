@@ -36,14 +36,25 @@ interface Site {
     remoteDbPassword?: string;
     remoteDbName?: string;
     jobs?: any[];
+    health?: SiteHealth | null;
+}
+
+interface SiteHealth {
+    status: 'up' | 'degraded' | 'down' | 'unknown';
+    httpStatus?: number | null;
+    responseMs?: number | null;
+    sslExpiresAt?: string | null;
+    error?: string | null;
+    lastCheckedAt?: string | null;
 }
 
 interface WpAdminCredentials {
     username: string;
     password: string;
-    expiresAt: string;
+    lastRotated?: string;
     loginUrl?: string;
     reused?: boolean;
+    justRotated?: boolean;
 }
 
 interface SettingsStatus {
@@ -93,6 +104,8 @@ let healthPollInterval: number | null = null;
 // Modal state
 const showModal = ref(false);
 const editingId = ref<string | null>(null);
+const discardConfirm = ref(false);
+const formSnapshot = ref<string>('');
 const formData = ref({
     label: '',
     localPath: '',
@@ -127,54 +140,111 @@ const formData = ref({
 });
 
 // WordPress admin state
-const wpAdminModal = ref<{ 
-    open: boolean; 
-    site: Site | null; 
-    loading: boolean; 
+const wpAdminModal = ref<{
+    open: boolean;
+    site: Site | null;
+    loading: boolean;
     credentials: WpAdminCredentials | null;
     error: string | null;
     debug: string | null;
+    loadingMessage: string;
 }>({
     open: false,
     site: null,
     loading: false,
     credentials: null,
     error: null,
-    debug: null
+    debug: null,
+    loadingMessage: ''
 });
 
-const generateWpAdmin = async (site: Site) => {
-    wpAdminModal.value = { open: true, site, loading: true, credentials: null, error: null, debug: null };
-    
+const wpQuickLogin = async (site: Site) => {
+    try {
+        const result = await request<{ success: boolean; url?: string; error?: string; debug?: string }>(
+            `/sites/${site.id}/wp-admin/login`,
+            'POST'
+        );
+        if (result?.success && result.url) {
+            window.open(result.url, '_blank', 'noopener');
+            success('Magic Link Opened', `Logging in to ${site.label}…`);
+        } else {
+            wpAdminModal.value = {
+                open: true, site, loading: false, credentials: null,
+                error: result?.error || 'Could not generate magic login link.',
+                debug: result?.debug || null,
+                loadingMessage: ''
+            };
+        }
+    } catch (e: any) {
+        wpAdminModal.value = {
+            open: true, site, loading: false, credentials: null,
+            error: e.message || 'Could not generate magic login link.',
+            debug: null,
+            loadingMessage: ''
+        };
+    }
+};
+
+const openWpCredentialsModal = async (site: Site) => {
+    wpAdminModal.value = {
+        open: true, site, loading: true, credentials: null,
+        error: null, debug: null, loadingMessage: 'Loading credentials…'
+    };
+    try {
+        const result = await request<WpAdminCredentials>(`/sites/${site.id}/wp-admin`);
+        if (result) {
+            wpAdminModal.value.credentials = result;
+        } else {
+            wpAdminModal.value.error = 'No stored credentials yet.';
+        }
+    } catch (e: any) {
+        // 404 = no creds yet; offer to create one
+        if (/no stored credentials|not found/i.test(e.message || '')) {
+            wpAdminModal.value.error = 'No stored credentials yet. Create the WebSync admin user to get started.';
+        } else {
+            wpAdminModal.value.error = e.message || 'Could not load credentials.';
+        }
+    } finally {
+        wpAdminModal.value.loading = false;
+    }
+};
+
+const wpRotatePassword = async () => {
+    const site = wpAdminModal.value.site;
+    if (!site) return;
+    wpAdminModal.value.loading = true;
+    wpAdminModal.value.loadingMessage = wpAdminModal.value.credentials
+        ? 'Rotating password…'
+        : 'Creating WebSync admin…';
+    wpAdminModal.value.error = null;
+    wpAdminModal.value.debug = null;
     try {
         const result = await request<WpAdminCredentials & { success: boolean; error?: string; debug?: string }>(
             `/sites/${site.id}/wp-admin`,
-            'POST',
-            { expiresInHours: 24 }
+            'POST'
         );
-        
         if (result?.success) {
             wpAdminModal.value.credentials = {
                 username: result.username,
                 password: result.password,
-                expiresAt: result.expiresAt,
                 loginUrl: result.loginUrl,
-                reused: result.reused
+                reused: result.reused,
+                justRotated: true,
+                lastRotated: new Date().toISOString()
             };
             success(
-                result.reused ? 'Password Reset' : 'Admin Created', 
-                result.reused 
-                    ? 'Existing WebSync admin password has been reset' 
-                    : 'Temporary WordPress admin created successfully'
+                result.reused ? 'Password Rotated' : 'Admin Created',
+                result.reused ? 'New password generated and stored.' : 'WebSync admin user is ready.'
             );
         } else {
-            wpAdminModal.value.error = result?.error || 'Could not create WordPress admin';
+            wpAdminModal.value.error = result?.error || 'Could not rotate password.';
             wpAdminModal.value.debug = result?.debug || null;
         }
     } catch (e: any) {
-        wpAdminModal.value.error = e.message || 'Could not create WordPress admin';
+        wpAdminModal.value.error = e.message || 'Could not rotate password.';
     } finally {
         wpAdminModal.value.loading = false;
+        wpAdminModal.value.loadingMessage = '';
     }
 };
 
@@ -329,6 +399,7 @@ const openAddModal = () => {
         remoteDbPassword: '',
         remoteDbName: ''
     };
+    formSnapshot.value = JSON.stringify(formData.value);
     showModal.value = true;
 };
 
@@ -360,7 +431,36 @@ const openEditModal = (site: Site) => {
         remoteDbPassword: site.remoteDbPassword || '',
         remoteDbName: site.remoteDbName || ''
     };
+    formSnapshot.value = JSON.stringify(formData.value);
     showModal.value = true;
+};
+
+const isFormDirty = () => JSON.stringify(formData.value) !== formSnapshot.value;
+
+const closeModal = () => {
+    if (isFormDirty()) {
+        discardConfirm.value = true;
+    } else {
+        showModal.value = false;
+    }
+};
+
+const confirmDiscard = () => {
+    discardConfirm.value = false;
+    showModal.value = false;
+};
+
+const handleModalKeydown = (e: KeyboardEvent) => {
+    if (e.key !== 'Escape') return;
+    if (discardConfirm.value) {
+        discardConfirm.value = false;
+        return;
+    }
+    if (showModal.value) {
+        closeModal();
+    } else if (wpAdminModal.value.open) {
+        wpAdminModal.value.open = false;
+    }
 };
 
 const handleSubmit = async () => {
@@ -420,6 +520,7 @@ const handleSubmit = async () => {
             success('Site Created', `${data.label} has been added`);
         }
         
+        formSnapshot.value = JSON.stringify(formData.value);
         showModal.value = false;
         loadData();
     } catch (e: any) {
@@ -582,18 +683,52 @@ useJobUpdates((update) => {
             }
             loadData();
         }
+    } else if (update.type === 'site:health' && update.siteId && update.health) {
+        const site = sites.value.find(s => s.id === update.siteId);
+        if (site) site.health = update.health as SiteHealth;
     }
 });
+
+// SSL expiry warning when fewer than this many days remain
+const SSL_WARN_DAYS = 30;
+
+const sslDaysRemaining = (health?: SiteHealth | null): number | null => {
+    if (!health?.sslExpiresAt) return null;
+    const days = Math.floor((new Date(health.sslExpiresAt).getTime() - Date.now()) / 86_400_000);
+    return days;
+};
+
+const healthTooltip = (health?: SiteHealth | null): string => {
+    if (!health) return 'Health check pending…';
+    if (health.status === 'unknown') return 'No siteUrl configured — set one in site settings.';
+    const parts: string[] = [];
+    if (health.httpStatus) parts.push(`HTTP ${health.httpStatus}`);
+    if (typeof health.responseMs === 'number') parts.push(`${health.responseMs}ms`);
+    if (health.error) parts.push(health.error);
+    if (health.lastCheckedAt) parts.push(`checked ${new Date(health.lastCheckedAt).toLocaleTimeString()}`);
+    return parts.length ? parts.join(' · ') : health.status;
+};
+
+const recheckHealth = async () => {
+    try {
+        await request('/sites/health/recheck', 'POST');
+        success('Health check started', 'Results will update in a moment');
+    } catch (e: any) {
+        error('Recheck failed', e.message || 'Try again');
+    }
+};
 
 onMounted(async () => {
     await loadData();
     startHealthPolling();
+    window.addEventListener('keydown', handleModalKeydown);
 });
 
 onUnmounted(() => {
     if (healthPollInterval) {
         clearInterval(healthPollInterval);
     }
+    window.removeEventListener('keydown', handleModalKeydown);
 });
 </script>
 
@@ -635,13 +770,23 @@ onUnmounted(() => {
                 <h2 class="section-title">Sites</h2>
                 <p class="section-subtitle">{{ sites.length }} site{{ sites.length !== 1 ? 's' : '' }} configured</p>
             </div>
-            <button class="btn btn-primary" @click="openAddModal">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="12" y1="5" x2="12" y2="19"/>
-                    <line x1="5" y1="12" x2="19" y2="12"/>
-                </svg>
-                Add Site
-      </button>
+            <div class="header-actions">
+                <button class="btn btn-secondary" @click="recheckHealth" title="Run a health check on every site now">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="23 4 23 10 17 10"/>
+                        <polyline points="1 20 1 14 7 14"/>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                    </svg>
+                    Recheck health
+                </button>
+                <button class="btn btn-primary" @click="openAddModal">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="12" y1="5" x2="12" y2="19"/>
+                        <line x1="5" y1="12" x2="19" y2="12"/>
+                    </svg>
+                    Add Site
+                </button>
+            </div>
     </div>
 
         <!-- Loading State -->
@@ -696,6 +841,21 @@ onUnmounted(() => {
                             </svg>
                         </span>
                         <h3 class="site-name">{{ site.label }}</h3>
+                        <span
+                            v-if="site.siteUrl"
+                            class="health-dot"
+                            :class="`health-${site.health?.status || 'unknown'}`"
+                            :title="healthTooltip(site.health)"
+                            aria-label="Site health"
+                        ></span>
+                        <span
+                            v-if="sslDaysRemaining(site.health) !== null && (sslDaysRemaining(site.health) as number) <= SSL_WARN_DAYS"
+                            class="ssl-warning"
+                            :class="{ 'ssl-expired': (sslDaysRemaining(site.health) as number) <= 0 }"
+                            :title="`SSL certificate expires ${new Date(site.health!.sslExpiresAt!).toLocaleDateString()}`"
+                        >
+                            SSL {{ (sslDaysRemaining(site.health) as number) <= 0 ? 'expired' : `${sslDaysRemaining(site.health)}d` }}
+                        </span>
                         <StatusBadge :status="getSiteStatus(site)" size="sm" />
                         <!-- Quick Links -->
                         <div class="quick-links" v-if="site.editorUrl || site.siteUrl || site.siteType === 'wordpress'">
@@ -724,16 +884,27 @@ onUnmounted(() => {
                                     <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
                                 </svg>
                             </a>
-                            <!-- WordPress Admin Button -->
-                            <button 
+                            <!-- WordPress Quick Login (magic link) -->
+                            <button
                                 v-if="site.siteType === 'wordpress' && site.wpContainer"
                                 class="quick-link quick-link-wp-admin"
-                                title="Generate WordPress Admin"
-                                @click="generateWpAdmin(site)"
+                                title="One-click login to WP Admin"
+                                @click="wpQuickLogin(site)"
                             >
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                                    <circle cx="12" cy="7" r="4"/>
+                                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                                </svg>
+          </button>
+                            <!-- WordPress Credentials -->
+                            <button
+                                v-if="site.siteType === 'wordpress' && site.wpContainer"
+                                class="quick-link"
+                                title="Show stored WP admin credentials"
+                                @click="openWpCredentialsModal(site)"
+                            >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                                    <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                                 </svg>
           </button>
         </div>
@@ -975,11 +1146,11 @@ onUnmounted(() => {
         <!-- Add/Edit Modal -->
         <Teleport to="body">
             <Transition name="modal">
-                <div v-if="showModal" class="modal-overlay" @click.self="showModal = false">
+                <div v-if="showModal" class="modal-overlay">
         <div class="modal-content">
                         <div class="modal-header">
                             <h2>{{ editingId ? 'Edit Site' : 'Add New Site' }}</h2>
-                            <button class="modal-close" @click="showModal = false">
+                            <button class="modal-close" @click="closeModal">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <line x1="18" y1="6" x2="6" y2="18"/>
                                     <line x1="6" y1="6" x2="18" y2="18"/>
@@ -1186,7 +1357,7 @@ onUnmounted(() => {
                             </div>
 
                 <div class="modal-actions">
-                                <button type="button" class="btn btn-secondary" @click="showModal = false">Cancel</button>
+                                <button type="button" class="btn btn-secondary" @click="closeModal">Cancel</button>
                                 <button type="submit" class="btn btn-primary">
                                     {{ editingId ? 'Save Changes' : 'Create Site' }}
                                 </button>
@@ -1198,7 +1369,7 @@ onUnmounted(() => {
         </Teleport>
 
         <!-- Delete Confirmation -->
-        <ConfirmDialog 
+        <ConfirmDialog
             :open="deleteConfirm.open"
             title="Delete Site?"
             :message="`Are you sure you want to delete '${deleteConfirm.siteName}'? This action cannot be undone.`"
@@ -1208,10 +1379,22 @@ onUnmounted(() => {
             @cancel="deleteConfirm.open = false"
         />
 
+        <!-- Discard Changes Confirmation -->
+        <ConfirmDialog
+            :open="discardConfirm"
+            title="Discard changes?"
+            message="You have unsaved changes. Are you sure you want to close this form? Your edits will be lost."
+            variant="warning"
+            confirmLabel="Discard"
+            cancelLabel="Keep editing"
+            @confirm="confirmDiscard"
+            @cancel="discardConfirm = false"
+        />
+
         <!-- WordPress Admin Modal -->
         <Teleport to="body">
             <Transition name="modal">
-                <div v-if="wpAdminModal.open" class="modal-overlay" @click.self="wpAdminModal.open = false">
+                <div v-if="wpAdminModal.open" class="modal-overlay">
                     <div class="modal-content modal-sm">
                         <div class="modal-header">
                             <h2>WordPress Admin Access</h2>
@@ -1226,38 +1409,32 @@ onUnmounted(() => {
                         <div class="modal-body">
                             <div v-if="wpAdminModal.loading" class="loading-state-sm">
                                 <div class="spinner"></div>
-                                <span>Creating temporary admin...</span>
+                                <span>{{ wpAdminModal.loadingMessage || 'Working…' }}</span>
                             </div>
 
-                            <!-- Error State -->
+                            <!-- Error / empty state -->
                             <div v-else-if="wpAdminModal.error" class="wp-admin-error">
                                 <div class="error-header">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <circle cx="12" cy="12" r="10"/>
-                                        <line x1="15" y1="9" x2="9" y2="15"/>
-                                        <line x1="9" y1="9" x2="15" y2="15"/>
+                                        <line x1="12" y1="8" x2="12" y2="12"/>
+                                        <line x1="12" y1="16" x2="12.01" y2="16"/>
                                     </svg>
-                                    <span>Failed to create admin</span>
+                                    <span>{{ wpAdminModal.credentials ? 'Something went wrong' : 'No stored credentials' }}</span>
                                 </div>
                                 <p class="error-message">{{ wpAdminModal.error }}</p>
-                                
+
                                 <details v-if="wpAdminModal.debug" class="debug-details">
                                     <summary>Debug Info</summary>
                                     <pre class="debug-output">{{ wpAdminModal.debug }}</pre>
                                 </details>
 
-                                <div class="error-help">
-                                    <strong>Common fixes:</strong>
-                                    <ul>
-                                        <li>Ensure WP-CLI is installed in your WordPress container</li>
-                                        <li>Verify the WP Container name matches your Docker container</li>
-                                        <li>Check the WP Path (usually /var/www/html)</li>
-                                    </ul>
+                                <div class="modal-actions">
+                                    <button class="btn btn-secondary" @click="wpAdminModal.open = false">Close</button>
+                                    <button class="btn btn-primary" @click="wpRotatePassword">
+                                        Create WebSync admin
+                                    </button>
                                 </div>
-
-                                <button class="btn btn-secondary" @click="wpAdminModal.open = false">
-                                    Close
-                                </button>
                             </div>
 
                             <div v-else-if="wpAdminModal.credentials" class="wp-admin-credentials">
@@ -1266,12 +1443,11 @@ onUnmounted(() => {
                                         <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                                         <polyline points="22 4 12 14.01 9 11.01"/>
                                     </svg>
-                                    <span v-if="wpAdminModal.credentials.reused">Password reset!</span>
-                                    <span v-else>Temporary admin created!</span>
+                                    <span v-if="wpAdminModal.credentials.justRotated">
+                                        {{ wpAdminModal.credentials.reused ? 'Password rotated' : 'Admin created' }}
+                                    </span>
+                                    <span v-else>Stored credentials</span>
                                 </div>
-                                <p v-if="wpAdminModal.credentials.reused" class="reused-notice">
-                                    Existing WebSync admin found — password has been reset.
-                                </p>
 
                                 <div class="credential-row">
                                     <label>Username</label>
@@ -1299,27 +1475,33 @@ onUnmounted(() => {
                                     </div>
                                 </div>
 
-                                <div class="credential-expiry">
+                                <div v-if="wpAdminModal.credentials.lastRotated" class="credential-expiry">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <circle cx="12" cy="12" r="10"/>
                                         <polyline points="12 6 12 12 16 14"/>
                                     </svg>
-                                    <span>Expires: {{ new Date(wpAdminModal.credentials.expiresAt).toLocaleString() }}</span>
+                                    <span>Last rotated: {{ new Date(wpAdminModal.credentials.lastRotated).toLocaleString() }}</span>
                                 </div>
 
-                                <a 
-                                    v-if="wpAdminModal.credentials.loginUrl"
-                                    :href="wpAdminModal.credentials.loginUrl"
-                                    target="_blank"
-                                    class="btn btn-primary btn-block"
-                                >
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                                        <polyline points="15 3 21 3 21 9"/>
-                                        <line x1="10" y1="14" x2="21" y2="3"/>
-                                    </svg>
-                                    Open WordPress Admin
-                                </a>
+                                <div class="modal-actions">
+                                    <button
+                                        class="btn btn-secondary"
+                                        @click="wpRotatePassword"
+                                        :disabled="wpAdminModal.loading"
+                                    >
+                                        Rotate password
+                                    </button>
+                                    <button
+                                        v-if="wpAdminModal.site"
+                                        class="btn btn-primary"
+                                        @click="wpQuickLogin(wpAdminModal.site!)"
+                                    >
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                                        </svg>
+                                        One-click login
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1696,6 +1878,41 @@ onUnmounted(() => {
     font-weight: var(--font-semibold);
     color: var(--text-primary);
 }
+
+/* Health indicators */
+.health-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    box-shadow: 0 0 0 2px var(--bg-elevated);
+    cursor: help;
+}
+.health-up { background: var(--color-success); box-shadow: 0 0 0 2px var(--bg-elevated), 0 0 6px var(--color-success); }
+.health-degraded { background: var(--color-warning); box-shadow: 0 0 0 2px var(--bg-elevated), 0 0 6px var(--color-warning); }
+.health-down { background: var(--color-danger); box-shadow: 0 0 0 2px var(--bg-elevated), 0 0 8px var(--color-danger); animation: pulse-down 2s ease-in-out infinite; }
+.health-unknown { background: var(--text-muted); }
+
+@keyframes pulse-down {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.ssl-warning {
+    font-size: var(--text-xs);
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-md);
+    background: var(--color-warning-subtle);
+    color: var(--color-warning);
+    font-weight: var(--font-medium);
+    cursor: help;
+}
+.ssl-warning.ssl-expired {
+    background: var(--color-danger-subtle);
+    color: var(--color-danger);
+}
+
+.header-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
 
 /* Quick Links */
 .quick-links {

@@ -45,8 +45,8 @@ RUN npm run build
 # Stage 3: Production Image
 FROM node:20-alpine AS production
 
-# Install rsync and openssh for sync operations, docker-cli for container management
-RUN apk add --no-cache rsync openssh-client docker-cli openssl
+# Install rsync, openssh, docker-cli, curl (for healthcheck)
+RUN apk add --no-cache rsync openssh-client docker-cli openssl curl
 
 WORKDIR /app
 
@@ -77,9 +77,9 @@ ENV DATABASE_URL="file:/data/websync.db"
 # Expose port
 EXPOSE 3000
 
-# Health check
+# Health check (curl -f fails on HTTP 4xx/5xx)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+    CMD curl -f http://localhost:3000/health || exit 1
 
 # Start command - sync database schema then start server
 CMD ["sh", "-c", "npx prisma db push --skip-generate && node dist/index.js"]

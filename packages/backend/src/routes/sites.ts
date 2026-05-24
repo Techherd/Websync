@@ -4,7 +4,10 @@ import { syncFiles, syncDatabase, canSync, SyncDirection, notifyRemoteOfSync } f
 import prisma from '../lib/prisma';
 import { refreshScheduler } from '../lib/scheduler';
 import { broadcastJobUpdate } from '../lib/websocket';
-import { generateWpAdmin, deleteWpAdmin } from '../lib/docker';
+import { generateWpAdmin, deleteWpAdmin, generateMagicLoginUrl } from '../lib/docker';
+import { encrypt, decrypt } from '../lib/crypto';
+import { logAudit } from '../lib/audit';
+import { runHealthCheckCycle } from '../lib/healthMonitor';
 import { 
     startRemoteContainers, 
     stopRemoteContainers, 
@@ -53,7 +56,8 @@ export default async function siteRoutes(server: FastifyInstance) {
                 jobs: {
                     orderBy: { startedAt: 'desc' },
                     take: 1
-                }
+                },
+                health: true
             }
         });
     });
@@ -67,7 +71,8 @@ export default async function siteRoutes(server: FastifyInstance) {
                 jobs: {
                     orderBy: { startedAt: 'desc' },
                     take: 10
-                }
+                },
+                health: true
             }
         });
         if (!site) return reply.status(404).send({ error: 'Site not found' });
@@ -79,6 +84,7 @@ export default async function siteRoutes(server: FastifyInstance) {
         const body = SiteSchema.parse(request.body);
         const site = await prisma.site.create({ data: body });
         await refreshScheduler();
+        await logAudit(request, 'site.create', site.id, { label: site.label });
         return site;
     });
 
@@ -86,7 +92,7 @@ export default async function siteRoutes(server: FastifyInstance) {
     server.put('/sites/:id', async (request, reply) => {
         const { id } = request.params as { id: string };
         const body = SiteSchema.partial().parse(request.body);
-        
+
         const existing = await prisma.site.findUnique({ where: { id } });
         if (!existing) return reply.status(404).send({ error: 'Site not found' });
 
@@ -94,24 +100,26 @@ export default async function siteRoutes(server: FastifyInstance) {
             where: { id },
             data: body
         });
-        
+
         // Refresh scheduler if schedule changed
         if (body.schedule !== undefined) {
             await refreshScheduler();
         }
-        
+
+        await logAudit(request, 'site.update', site.id, { fields: Object.keys(body) });
         return site;
     });
 
     // Delete site
     server.delete('/sites/:id', async (request, reply) => {
         const { id } = request.params as { id: string };
-        
+
         const existing = await prisma.site.findUnique({ where: { id } });
         if (!existing) return reply.status(404).send({ error: 'Site not found' });
 
         await prisma.site.delete({ where: { id } });
         await refreshScheduler();
+        await logAudit(request, 'site.delete', id, { label: existing.label });
         return { success: true };
     });
 
@@ -148,6 +156,8 @@ export default async function siteRoutes(server: FastifyInstance) {
             type: 'job:started',
             job
         });
+
+        await logAudit(request, 'site.sync', site.id, { jobId: job.id, direction: direction || 'default', force: !!force });
 
         // Run Sync in Background
         (async () => {
@@ -361,66 +371,112 @@ export default async function siteRoutes(server: FastifyInstance) {
         return listRemoteContainers();
     });
 
+    // Manually trigger a health-check cycle for all sites (fire and forget).
+    // Results are persisted and broadcast via WebSocket.
+    server.post('/sites/health/recheck', async () => {
+        runHealthCheckCycle().catch(err => console.error('[HEALTH] manual recheck failed', err));
+        return { success: true };
+    });
+
     // ==========================================
     // WordPress Admin Generation
     // ==========================================
 
-    // Generate temporary WordPress admin credentials
+    const buildWpAdminUrl = (site: { wpAdminUrl: string | null; siteUrl: string | null }) =>
+        site.wpAdminUrl || (site.siteUrl ? `${site.siteUrl.replace(/\/+$/, '')}/wp-admin` : undefined);
+
+    // Retrieve stored WP admin credentials for a site
+    server.get('/sites/:id/wp-admin', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const site = await prisma.site.findUnique({
+            where: { id },
+            include: { wpCredential: true }
+        });
+        if (!site) return reply.status(404).send({ error: 'Site not found' });
+        if (!site.wpCredential) {
+            return reply.status(404).send({ error: 'No stored credentials yet — create one to begin.' });
+        }
+        return {
+            username: site.wpCredential.username,
+            password: decrypt(site.wpCredential.password),
+            lastRotated: site.wpCredential.lastRotated,
+            loginUrl: buildWpAdminUrl(site)
+        };
+    });
+
+    // Create or rotate the persistent WP admin user and store its password
     server.post('/sites/:id/wp-admin', async (request, reply) => {
         const { id } = request.params as { id: string };
-        const { expiresInHours } = (request.body || {}) as { expiresInHours?: number };
-        
+
         const site = await prisma.site.findUnique({ where: { id } });
         if (!site) return reply.status(404).send({ error: 'Site not found' });
 
         if (site.siteType !== 'wordpress') {
             return reply.status(400).send({ error: 'Site is not a WordPress site' });
         }
-
         if (!site.wpContainer) {
-            return reply.status(400).send({ 
-                error: 'WordPress container not configured. Set wpContainer in site settings.' 
+            return reply.status(400).send({
+                error: 'WordPress container not configured. Set wpContainer in site settings.'
             });
         }
 
-        console.log(`Generating WP admin for site ${site.label}, container: ${site.wpContainer}, path: ${site.wpPath || '/var/www/html'}`);
-        
-        const result = await generateWpAdmin(
-            site.wpContainer,
-            site.wpPath || '/var/www/html',
-            expiresInHours || 24
-        );
+        console.log(`Rotating WP admin for site ${site.label}, container: ${site.wpContainer}`);
+        const result = await generateWpAdmin(site.wpContainer, site.wpPath || '/var/www/html');
 
-        console.log('WP Admin generation result:', JSON.stringify(result, null, 2));
-
-        if (!result.success) {
-            return reply.status(500).send({ 
-                error: result.error,
-                debug: result.debug
-            });
+        if (!result.success || !result.username || !result.password) {
+            return reply.status(500).send({ error: result.error, debug: result.debug });
         }
 
-        // Build login URL if we have the admin URL
-        const loginUrl = site.wpAdminUrl 
-            ? site.wpAdminUrl 
-            : site.siteUrl 
-                ? `${site.siteUrl}/wp-admin`
-                : undefined;
+        await prisma.wpAdminCredential.upsert({
+            where: { siteId: site.id },
+            create: {
+                siteId: site.id,
+                username: result.username,
+                password: encrypt(result.password)
+            },
+            update: {
+                username: result.username,
+                password: encrypt(result.password),
+                lastRotated: new Date()
+            }
+        });
+
+        await logAudit(request, 'wp.rotatePassword', site.id, { username: result.username, reused: !!result.reused });
 
         return {
             success: true,
             username: result.username,
             password: result.password,
-            expiresAt: result.expiresAt,
-            loginUrl,
-            message: `Temporary admin created. Will be automatically deleted in ${expiresInHours || 24} hours.`
+            reused: result.reused,
+            loginUrl: buildWpAdminUrl(site),
+            message: result.reused ? 'Password rotated for existing WebSync admin.' : 'WebSync admin created.'
         };
     });
 
-    // Delete a WordPress admin user manually
+    // Generate a one-time magic login URL for the stored WP admin
+    server.post('/sites/:id/wp-admin/login', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const site = await prisma.site.findUnique({
+            where: { id },
+            include: { wpCredential: true }
+        });
+        if (!site) return reply.status(404).send({ error: 'Site not found' });
+        if (!site.wpContainer) {
+            return reply.status(400).send({ error: 'WordPress container not configured.' });
+        }
+        const username = site.wpCredential?.username || 'websync_admin';
+        const result = await generateMagicLoginUrl(site.wpContainer, username, site.wpPath || '/var/www/html');
+        if (!result.success || !result.url) {
+            return reply.status(500).send({ error: result.error, debug: result.debug });
+        }
+        await logAudit(request, 'wp.login', site.id, { username });
+        return { success: true, url: result.url, username };
+    });
+
+    // Delete a WordPress admin user manually (also clears stored credential)
     server.delete('/sites/:id/wp-admin/:username', async (request, reply) => {
         const { id, username } = request.params as { id: string; username: string };
-        
+
         const site = await prisma.site.findUnique({ where: { id } });
         if (!site) return reply.status(404).send({ error: 'Site not found' });
 
@@ -429,9 +485,9 @@ export default async function siteRoutes(server: FastifyInstance) {
         }
 
         // Safety check - only allow deleting websync-created users
-        if (!username.startsWith('websync_admin_')) {
-            return reply.status(400).send({ 
-                error: 'Can only delete WebSync-created admin users (websync_admin_*)' 
+        if (!username.startsWith('websync_admin')) {
+            return reply.status(400).send({
+                error: 'Can only delete WebSync-created admin users (websync_admin*)'
             });
         }
 
@@ -444,6 +500,8 @@ export default async function siteRoutes(server: FastifyInstance) {
         if (!result.success) {
             return reply.status(500).send({ error: result.error });
         }
+
+        await prisma.wpAdminCredential.deleteMany({ where: { siteId: site.id, username } });
 
         return { success: true, message: `User ${username} deleted` };
     });

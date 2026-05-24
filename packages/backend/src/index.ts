@@ -9,11 +9,14 @@ import fs from 'fs';
 import siteRoutes from './routes/sites';
 import settingsRoutes from './routes/settings';
 import jobRoutes from './routes/jobs';
+import userRoutes from './routes/users';
+import auditRoutes from './routes/audit';
 import { receivedSitesRoutes } from './routes/received-sites';
 import { registerWebSocket } from './lib/websocket';
 import { registerAuthRoutes, authMiddleware } from './middleware/auth';
 import { startScheduler } from './lib/scheduler';
 import { startHealthChecker } from './lib/healthChecker';
+import { startSiteHealthMonitor } from './lib/healthMonitor';
 import prisma from './lib/prisma';
 
 const server = Fastify({
@@ -72,10 +75,12 @@ server.addHook('preHandler', async (request, reply) => {
         
         // Frontend routes (SPA) - these serve index.html, auth is handled client-side
         // Only skip if it looks like a frontend route (not an API call)
-        const isApiRoute = url.startsWith('/auth/') || 
-                          url.startsWith('/sites') || 
-                          url.startsWith('/jobs') || 
+        const isApiRoute = url.startsWith('/auth/') ||
+                          url.startsWith('/sites') ||
+                          url.startsWith('/jobs') ||
                           url.startsWith('/settings') ||
+                          url.startsWith('/users') ||
+                          url.startsWith('/audit') ||
                           url.startsWith('/remote-containers') ||
                           url.startsWith('/received-sites') ||
                           url === '/ws' ||
@@ -97,6 +102,8 @@ server.register(registerWebSocket);
 server.register(siteRoutes);
 server.register(settingsRoutes);
 server.register(jobRoutes);
+server.register(userRoutes);
+server.register(auditRoutes);
 server.register(receivedSitesRoutes);
 
 // Serve static frontend in production
@@ -112,10 +119,12 @@ if (isProduction) {
         // SPA fallback - serve index.html for client-side routes
         server.setNotFoundHandler(async (request, reply) => {
             // If it's an API route, return 404
-            if (request.url.startsWith('/sites') || 
-                request.url.startsWith('/jobs') || 
+            if (request.url.startsWith('/sites') ||
+                request.url.startsWith('/jobs') ||
                 request.url.startsWith('/settings') ||
                 request.url.startsWith('/auth') ||
+                request.url.startsWith('/users') ||
+                request.url.startsWith('/audit') ||
                 request.url.startsWith('/remote-containers') ||
                 request.url.startsWith('/received-sites') ||
                 request.url.startsWith('/ws')) {
@@ -140,6 +149,7 @@ if (isProduction) {
 // Start scheduler and health checker
 startScheduler();
 startHealthChecker();
+startSiteHealthMonitor();
 
 const start = async () => {
     try {

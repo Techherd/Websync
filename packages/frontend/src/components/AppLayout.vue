@@ -22,6 +22,8 @@ onMounted(() => {
 const navItems = [
     { path: '/', label: 'Dashboard', icon: 'dashboard' },
     { path: '/jobs', label: 'Jobs', icon: 'history' },
+    { path: '/activity', label: 'Activity', icon: 'activity' },
+    { path: '/users', label: 'Users', icon: 'users' },
     { path: '/settings', label: 'Settings', icon: 'settings' }
 ];
 
@@ -74,6 +76,15 @@ const toggleSidebar = () => {
                         <template v-else-if="item.icon === 'history'">
                             <circle cx="12" cy="12" r="10"/>
                             <polyline points="12 6 12 12 16 14"/>
+                        </template>
+                        <template v-else-if="item.icon === 'activity'">
+                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                        </template>
+                        <template v-else-if="item.icon === 'users'">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                            <circle cx="9" cy="7" r="4"/>
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
                         </template>
                         <template v-else-if="item.icon === 'settings'">
                             <circle cx="12" cy="12" r="3"/>

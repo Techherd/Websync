@@ -14,7 +14,11 @@ export interface JobUpdate {
 }
 
 export const broadcastJobUpdate = (update: JobUpdate) => {
-    const message = JSON.stringify(update);
+    broadcast(update);
+};
+
+export const broadcast = (payload: unknown) => {
+    const message = JSON.stringify(payload);
     clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(message);

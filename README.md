@@ -434,12 +434,16 @@ This starts:
 # Build for production
 npm run build
 
-# Build Docker image
-npm run docker:build
+# Docker - Multi-platform (amd64 + arm64)
+npm run docker:push          # Build and push both to registry (Docker Hub)
+npm run docker:build         # Build both platforms (no push)
 
-# Build for AMD64 (for Unraid on x86)
-npm run docker:build:amd64
+# Docker - Single platform (for local use)
+npm run docker:build:amd64   # Build amd64 only (e.g. Unraid on x86)
+npm run docker:build:arm64   # Build arm64 only
 ```
+
+Before pushing, set `DOCKER_HUB_IMAGE` and `WEBSYNC_VERSION` in `.env` (see `env.example`).
 
 ---
 

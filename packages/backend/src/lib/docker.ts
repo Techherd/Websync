@@ -42,26 +42,27 @@ export const executeCommand = async (containerName: string, cmd: string[]): Prom
     });
 };
 
+const WEBSYNC_ADMIN_USERNAME = 'websync_admin';
+
 /**
- * Generate a temporary WordPress admin user using WP-CLI
- * Checks for existing websync_admin_* users first and reuses/resets password if found
+ * Create or rotate the persistent WordPress admin user managed by WebSync.
+ * Idempotent: uses a stable `websync_admin` user across calls and resets its
+ * password on each invocation. Caller is responsible for persisting the
+ * returned credentials.
  */
 export const generateWpAdmin = async (
     containerName: string,
-    wpPath: string = '/var/www/html',
-    expiresInHours: number = 24
+    wpPath: string = '/var/www/html'
 ): Promise<{
     success: boolean;
     username?: string;
     password?: string;
-    expiresAt?: string;
-    loginUrl?: string;
     error?: string;
     debug?: string;
     reused?: boolean;
 }> => {
     const logs: string[] = [];
-    
+
     try {
         logs.push(`Container: ${containerName}`);
         logs.push(`WP Path: ${wpPath}`);
@@ -120,26 +121,21 @@ export const generateWpAdmin = async (
             };
         }
         
-        // Step 4: Check for existing websync_admin_* user
-        const listCmd = `cd ${wpPath} && ${wpCliPath} user list --field=user_login --allow-root 2>&1 | grep "^websync_admin_" | head -1`;
-        const existingUser = await executeCommand(containerName, ['sh', '-c', listCmd]);
-        logs.push(`Existing user check: "${existingUser.trim()}"`);
-        
-        let username: string;
-        let password: string;
+        // Step 4: Check for an existing websync_admin user (current or legacy random-suffixed)
+        const listCmd = `cd ${wpPath} && ${wpCliPath} user list --field=user_login --allow-root 2>&1 | grep "^websync_admin" | head -1`;
+        const existingUser = (await executeCommand(containerName, ['sh', '-c', listCmd])).trim();
+        logs.push(`Existing user check: "${existingUser}"`);
+
+        const password = crypto.randomBytes(16).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
+        let username = WEBSYNC_ADMIN_USERNAME;
         let reused = false;
-        
-        if (existingUser && existingUser.trim().startsWith('websync_admin_')) {
-            // Reuse existing user - just reset their password
-            username = existingUser.trim();
-            password = crypto.randomBytes(16).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
-            
+
+        if (existingUser && existingUser.startsWith('websync_admin')) {
+            username = existingUser;
             logs.push(`Found existing user: ${username}, resetting password`);
-            
             const resetCmd = `cd ${wpPath} && ${wpCliPath} user update "${username}" --user_pass="${password}" --allow-root 2>&1`;
             const resetResult = await executeCommand(containerName, ['sh', '-c', resetCmd]);
             logs.push(`Password reset result: ${resetResult}`);
-            
             if (resetResult.toLowerCase().includes('error')) {
                 return {
                     success: false,
@@ -147,26 +143,17 @@ export const generateWpAdmin = async (
                     debug: logs.join('\n')
                 };
             }
-            
             reused = true;
         } else {
-            // Create new user
-            const randomSuffix = crypto.randomBytes(4).toString('hex');
-            username = `websync_admin_${randomSuffix}`;
-            password = crypto.randomBytes(16).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
             const email = `${username}@websync.local`;
-            
             logs.push(`Creating new user: ${username}`);
-            
             const createCmd = `cd ${wpPath} && ${wpCliPath} user create "${username}" "${email}" --user_pass="${password}" --role=administrator --allow-root 2>&1`;
             const createResult = await executeCommand(containerName, ['sh', '-c', createCmd]);
             logs.push(`Create result: ${createResult}`);
-            
-            // Verify user was created
+
             const verifyCmd = `cd ${wpPath} && ${wpCliPath} user get "${username}" --field=ID --allow-root 2>&1`;
             const verifyResult = await executeCommand(containerName, ['sh', '-c', verifyCmd]);
             logs.push(`Verify result: ${verifyResult}`);
-            
             const userId = parseInt(verifyResult.trim(), 10);
             if (isNaN(userId)) {
                 return {
@@ -175,32 +162,15 @@ export const generateWpAdmin = async (
                     debug: logs.join('\n')
                 };
             }
-            
             logs.push(`User created with ID: ${userId}`);
         }
-        
-        const expiresAt = new Date(Date.now() + expiresInHours * 60 * 60 * 1000);
-        
-        // Schedule cleanup (delete user after expiration) - only for new users
-        if (!reused) {
-            setTimeout(async () => {
-                try {
-                    const deleteCmd = `cd ${wpPath} && ${wpCliPath} user delete ${username} --yes --allow-root 2>/dev/null || true`;
-                    await executeCommand(containerName, ['sh', '-c', deleteCmd]);
-                    console.log(`Deleted expired WordPress admin: ${username}`);
-                } catch (e) {
-                    console.error(`Failed to delete expired WordPress admin: ${username}`, e);
-                }
-            }, expiresInHours * 60 * 60 * 1000);
-        }
-        
-        console.log(`WordPress admin ${reused ? 'reused' : 'created'}: ${username} (expires: ${expiresAt.toISOString()})`);
-        
+
+        console.log(`WordPress admin ${reused ? 'reset' : 'created'}: ${username}`);
+
         return {
             success: true,
             username,
             password,
-            expiresAt: expiresAt.toISOString(),
             reused,
             debug: logs.join('\n')
         };
@@ -212,6 +182,84 @@ export const generateWpAdmin = async (
             error: error.message || 'Failed to generate WordPress admin',
             debug: logs.join('\n')
         };
+    }
+};
+
+/**
+ * Locate the WP-CLI binary inside a container, checking $PATH and common install paths.
+ */
+const findWpCli = async (containerName: string, wpPath: string): Promise<string | null> => {
+    try {
+        const which = (await executeCommand(containerName, ['sh', '-c', 'which wp 2>/dev/null || echo ""'])).trim();
+        if (which) return which;
+    } catch {}
+    for (const candidate of ['/usr/local/bin/wp', '/usr/bin/wp', `${wpPath}/wp-cli.phar`]) {
+        try {
+            const result = await executeCommand(containerName, ['sh', '-c', `test -f ${candidate} && echo exists || echo no`]);
+            if (result.includes('exists')) return candidate;
+        } catch {}
+    }
+    return null;
+};
+
+/**
+ * Generate a one-time magic login URL for the given WordPress user.
+ * Requires the `aaemnnosttv/wp-cli-login-command` package to be installed in
+ * the container. If absent, attempts to install it automatically (one-time).
+ */
+export const generateMagicLoginUrl = async (
+    containerName: string,
+    username: string,
+    wpPath: string = '/var/www/html'
+): Promise<{ success: boolean; url?: string; error?: string; debug?: string }> => {
+    const logs: string[] = [];
+    try {
+        const wpCli = await findWpCli(containerName, wpPath);
+        if (!wpCli) {
+            return { success: false, error: 'WP-CLI not found in container', debug: logs.join('\n') };
+        }
+        logs.push(`wp-cli: ${wpCli}`);
+
+        // Check if the login command is registered
+        const hasLogin = await executeCommand(containerName, [
+            'sh', '-c',
+            `cd ${wpPath} && ${wpCli} cli has-command login --allow-root 2>/dev/null && echo yes || echo no`
+        ]);
+        logs.push(`has login command: ${hasLogin.trim()}`);
+
+        if (!hasLogin.includes('yes')) {
+            // Try to install the login command (and its companion mu-plugin)
+            const installPkg = await executeCommand(containerName, [
+                'sh', '-c',
+                `cd ${wpPath} && ${wpCli} package install aaemnnosttv/wp-cli-login-command --allow-root 2>&1`
+            ]);
+            logs.push(`package install: ${installPkg}`);
+            const installCmd = await executeCommand(containerName, [
+                'sh', '-c',
+                `cd ${wpPath} && ${wpCli} login install --activate --yes --allow-root 2>&1`
+            ]);
+            logs.push(`login install: ${installCmd}`);
+        }
+
+        const magic = await executeCommand(containerName, [
+            'sh', '-c',
+            `cd ${wpPath} && ${wpCli} login as "${username}" --url-only --allow-root 2>&1`
+        ]);
+        logs.push(`magic url result: ${magic}`);
+
+        const url = magic.split('\n').map(s => s.trim()).find(s => /^https?:\/\//.test(s));
+        if (!url) {
+            return {
+                success: false,
+                error: `Could not generate magic link. Output: ${magic.trim()}`,
+                debug: logs.join('\n')
+            };
+        }
+
+        return { success: true, url, debug: logs.join('\n') };
+    } catch (error: any) {
+        logs.push(`Exception: ${error.message}`);
+        return { success: false, error: error.message || 'Failed to generate magic link', debug: logs.join('\n') };
     }
 };
 

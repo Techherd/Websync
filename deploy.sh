@@ -62,7 +62,7 @@ services:
       - \${SSH_KEY_PATH:-/root/.ssh}:/root/.ssh:ro
       - /mnt/user/appdata:/mnt/user/appdata
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
