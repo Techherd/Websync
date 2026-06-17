@@ -186,9 +186,20 @@ export const generateWpAdmin = async (
 };
 
 /**
+ * Strip PHP Warning/Notice/Deprecated lines so real errors aren't buried.
+ */
+const filterPhpNoise = (output: string): string =>
+    output
+        .split('\n')
+        .map(s => s.trim())
+        .filter(s => s && !/^(\[[^\]]+\]\s+)?(PHP\s+)?(Warning|Notice|Deprecated):/i.test(s) && !/^Warning:/i.test(s))
+        .join('\n')
+        .trim();
+
+/**
  * Locate the WP-CLI binary inside a container, checking $PATH and common install paths.
  */
-const findWpCli = async (containerName: string, wpPath: string): Promise<string | null> => {
+export const findWpCli = async (containerName: string, wpPath: string): Promise<string | null> => {
     try {
         const which = (await executeCommand(containerName, ['sh', '-c', 'which wp 2>/dev/null || echo ""'])).trim();
         if (which) return which;
@@ -249,13 +260,7 @@ export const generateMagicLoginUrl = async (
 
         const url = magic.split('\n').map(s => s.trim()).find(s => /^https?:\/\//.test(s));
         if (!url) {
-            // Strip the noisy PHP Warning/Notice lines so the real error shows up.
-            const realError = magic
-                .split('\n')
-                .map(s => s.trim())
-                .filter(s => s && !/^(\[[^\]]+\]\s+)?(PHP\s+)?(Warning|Notice|Deprecated):/i.test(s) && !/^Warning:/i.test(s))
-                .join('\n')
-                .trim() || magic.trim();
+            const realError = filterPhpNoise(magic) || magic.trim();
             return {
                 success: false,
                 error: `Could not generate magic link: ${realError}`,
@@ -268,6 +273,104 @@ export const generateMagicLoginUrl = async (
         logs.push(`Exception: ${error.message}`);
         return { success: false, error: error.message || 'Failed to generate magic link', debug: logs.join('\n') };
     }
+};
+
+export interface MagicSetupStep {
+    name: string;
+    success: boolean;
+    output: string;
+    skipped?: boolean;
+}
+
+/**
+ * Prepare a WordPress site for magic-link login:
+ *   1. Install the wp-cli-login-command package (CLI extension)
+ *   2. Install + activate the companion plugin (wp-cli-login-server)
+ *   3. Set a known endpoint (so one Cloudflare / WAF rule covers every site)
+ *   4. Flush rewrite rules so the new endpoint takes effect immediately
+ *
+ * Idempotent — safe to run multiple times. Steps 1 & 2 are skipped if already done.
+ */
+export const setupMagicLogin = async (
+    containerName: string,
+    wpPath: string = '/var/www/html',
+    endpoint: string = 'wpcli-magic'
+): Promise<{ success: boolean; steps: MagicSetupStep[]; error?: string }> => {
+    const wpCli = await findWpCli(containerName, wpPath);
+    if (!wpCli) {
+        return { success: false, steps: [], error: 'WP-CLI not found in container' };
+    }
+
+    const run = async (
+        name: string,
+        cmd: string,
+        skipIfTrue?: boolean
+    ): Promise<MagicSetupStep> => {
+        if (skipIfTrue) {
+            return { name, success: true, output: 'Already installed', skipped: true };
+        }
+        try {
+            const raw = await executeCommand(containerName, ['sh', '-c', cmd]);
+            const cleaned = filterPhpNoise(raw) || raw.trim();
+            const lower = cleaned.toLowerCase();
+            // WP-CLI prefixes errors with "Error:" — treat as failure unless a Success appears
+            const failed = /(^|\n)error:/i.test(cleaned) && !/(^|\n)success:/i.test(cleaned);
+            return { name, success: !failed, output: cleaned };
+        } catch (e: any) {
+            return { name, success: false, output: e.message || String(e) };
+        }
+    };
+
+    // Detect already-installed state so we report "Already installed" instead of churning
+    let pkgInstalled = false;
+    try {
+        const check = await executeCommand(containerName, [
+            'sh', '-c',
+            `cd ${wpPath} && ${wpCli} cli has-command login --allow-root 2>/dev/null && echo yes || echo no`
+        ]);
+        pkgInstalled = check.includes('yes');
+    } catch {}
+
+    let pluginActive = false;
+    try {
+        const check = await executeCommand(containerName, [
+            'sh', '-c',
+            `cd ${wpPath} && ${wpCli} plugin is-active wp-cli-login-server --allow-root >/dev/null 2>&1 && echo yes || echo no`
+        ]);
+        pluginActive = check.includes('yes');
+    } catch {}
+
+    const steps: MagicSetupStep[] = [];
+    steps.push(await run(
+        'Install wp-cli-login-command package',
+        `cd ${wpPath} && ${wpCli} package install aaemnnosttv/wp-cli-login-command --allow-root 2>&1`,
+        pkgInstalled
+    ));
+    steps.push(await run(
+        'Install + activate companion plugin',
+        `cd ${wpPath} && ${wpCli} login install --activate --yes --allow-root 2>&1`,
+        pluginActive
+    ));
+    // Write the wp_cli_login option.
+    //
+    // The companion plugin stores its config as a JSON *string* (it calls
+    // json_decode() on read). We MUST store as a string — not as a serialized
+    // PHP array — or the plugin crashes with a fatal at LoginCommand.php:243.
+    //
+    // `wp option update <name> <json>` (without --format=json) writes the value
+    // as a string, which matches the plugin's expectation. This works whether
+    // the option currently exists, is missing, or is in a broken state from a
+    // previous --format=json write.
+    steps.push(await run(
+        `Set magic endpoint to "${endpoint}"`,
+        `cd ${wpPath} && ${wpCli} option update wp_cli_login '{"endpoint":"${endpoint}","version":"^1.5"}' --allow-root 2>&1`
+    ));
+    steps.push(await run(
+        'Flush rewrite rules',
+        `cd ${wpPath} && ${wpCli} rewrite flush --allow-root 2>&1`
+    ));
+
+    return { success: steps.every(s => s.success), steps };
 };
 
 /**

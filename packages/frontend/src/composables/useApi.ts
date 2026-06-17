@@ -124,11 +124,28 @@ export function useApi() {
         method: 'DELETE'
     });
     
-    const syncSite = (id: string, options?: { direction?: 'push' | 'pull' | 'bidirectional'; force?: boolean }) => 
+    const syncSite = (id: string, options?: { direction?: 'push' | 'pull' | 'bidirectional'; force?: boolean }) =>
         request<any>(`/sites/${id}/sync`, {
             method: 'POST',
             body: options ? JSON.stringify(options) : undefined
         });
+
+    // Integrity / malware scan
+    const scanSite = (id: string) => request<any>(`/sites/${id}/scan`, { method: 'POST' });
+
+    const getScan = (id: string) => request<any>(`/sites/${id}/scan`);
+
+    // Scan allowlist (global)
+    const getAllowlist = () => request<any[]>('/scan-allowlist');
+
+    const addAllowlist = (category: string, path: string, note?: string) =>
+        request<any>('/scan-allowlist', {
+            method: 'POST',
+            body: JSON.stringify({ category, path, note })
+        });
+
+    const removeAllowlist = (id: string) =>
+        request<{ success: boolean }>(`/scan-allowlist/${id}`, { method: 'DELETE' });
 
     // Jobs
     const getJobs = (params?: { siteId?: string; status?: string; limit?: number; offset?: number }) => {
@@ -207,7 +224,12 @@ export function useApi() {
         updateSite,
         deleteSite,
         syncSite,
-        
+        scanSite,
+        getScan,
+        getAllowlist,
+        addAllowlist,
+        removeAllowlist,
+
         // Jobs
         getJobs,
         getJob,

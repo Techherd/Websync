@@ -37,6 +37,7 @@ interface Site {
     remoteDbName?: string;
     jobs?: any[];
     health?: SiteHealth | null;
+    latestScan?: SiteScan | null;
 }
 
 interface SiteHealth {
@@ -46,6 +47,39 @@ interface SiteHealth {
     sslExpiresAt?: string | null;
     error?: string | null;
     lastCheckedAt?: string | null;
+}
+
+type ScanStatus = 'clean' | 'warning' | 'compromised' | 'error' | 'unknown';
+type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+interface ScanFinding {
+    category: string;
+    severity: Severity;
+    title: string;
+    paths: string[];
+    detail: string;
+    remediation: string;
+}
+
+interface SiteScan {
+    id?: string;
+    status: ScanStatus;
+    coreStatus?: string | null;
+    pluginStatus?: string | null;
+    findings?: ScanFinding[];
+    findingsCount?: number;
+    critical?: number;
+    durationMs?: number;
+    error?: string | null;
+    createdAt?: string;
+}
+
+interface AllowlistEntry {
+    id: string;
+    category: string;
+    path: string;
+    note?: string | null;
+    builtin?: boolean;
 }
 
 interface WpAdminCredentials {
@@ -81,7 +115,7 @@ interface ReceivedSite {
     totalSize?: string;
 }
 
-const { getSites, createSite, updateSite, deleteSite, syncSite, getReceivedSites, deleteReceivedSite, request } = useApi();
+const { getSites, createSite, updateSite, deleteSite, syncSite, scanSite, getScan, getAllowlist, addAllowlist, removeAllowlist, getReceivedSites, deleteReceivedSite, request } = useApi();
 const { success, error } = useToast();
 
 const sites = ref<Site[]>([]);
@@ -139,6 +173,13 @@ const formData = ref({
     remoteDbName: ''
 });
 
+interface MagicSetupStep {
+    name: string;
+    success: boolean;
+    output: string;
+    skipped?: boolean;
+}
+
 // WordPress admin state
 const wpAdminModal = ref<{
     open: boolean;
@@ -148,6 +189,7 @@ const wpAdminModal = ref<{
     error: string | null;
     debug: string | null;
     loadingMessage: string;
+    setupResult: { success: boolean; steps: MagicSetupStep[] } | null;
 }>({
     open: false,
     site: null,
@@ -155,7 +197,8 @@ const wpAdminModal = ref<{
     credentials: null,
     error: null,
     debug: null,
-    loadingMessage: ''
+    loadingMessage: '',
+    setupResult: null
 });
 
 const wpQuickLogin = async (site: Site) => {
@@ -172,7 +215,8 @@ const wpQuickLogin = async (site: Site) => {
                 open: true, site, loading: false, credentials: null,
                 error: result?.error || 'Could not generate magic login link.',
                 debug: result?.debug || null,
-                loadingMessage: ''
+                loadingMessage: '',
+                setupResult: null
             };
         }
     } catch (e: any) {
@@ -180,7 +224,8 @@ const wpQuickLogin = async (site: Site) => {
             open: true, site, loading: false, credentials: null,
             error: e.message || 'Could not generate magic login link.',
             debug: null,
-            loadingMessage: ''
+            loadingMessage: '',
+            setupResult: null
         };
     }
 };
@@ -188,7 +233,8 @@ const wpQuickLogin = async (site: Site) => {
 const openWpCredentialsModal = async (site: Site) => {
     wpAdminModal.value = {
         open: true, site, loading: true, credentials: null,
-        error: null, debug: null, loadingMessage: 'Loading credentials…'
+        error: null, debug: null, loadingMessage: 'Loading credentials…',
+        setupResult: null
     };
     try {
         const result = await request<WpAdminCredentials>(`/sites/${site.id}/wp-admin`);
@@ -206,6 +252,37 @@ const openWpCredentialsModal = async (site: Site) => {
         }
     } finally {
         wpAdminModal.value.loading = false;
+    }
+};
+
+const wpSetupMagic = async () => {
+    const site = wpAdminModal.value.site;
+    if (!site) return;
+    wpAdminModal.value.loading = true;
+    wpAdminModal.value.loadingMessage = 'Setting up magic login…';
+    wpAdminModal.value.error = null;
+    wpAdminModal.value.debug = null;
+    wpAdminModal.value.setupResult = null;
+    try {
+        const result = await request<{ success: boolean; steps: MagicSetupStep[]; error?: string }>(
+            `/sites/${site.id}/wp-admin/setup`,
+            'POST'
+        );
+        if (!result) {
+            wpAdminModal.value.error = 'Setup returned no response.';
+        } else {
+            wpAdminModal.value.setupResult = { success: result.success, steps: result.steps || [] };
+            if (result.success) {
+                success('Magic login ready', `${site.label} is set up for one-click login.`);
+            } else {
+                wpAdminModal.value.error = result.error || 'One or more setup steps failed. See details below.';
+            }
+        }
+    } catch (e: any) {
+        wpAdminModal.value.error = e.message || 'Setup failed.';
+    } finally {
+        wpAdminModal.value.loading = false;
+        wpAdminModal.value.loadingMessage = '';
     }
 };
 
@@ -245,6 +322,166 @@ const wpRotatePassword = async () => {
     } finally {
         wpAdminModal.value.loading = false;
         wpAdminModal.value.loadingMessage = '';
+    }
+};
+
+// ============================================================
+// WordPress integrity / malware scan
+// ============================================================
+
+const scanModal = ref<{
+    open: boolean;
+    site: Site | null;
+    loading: boolean;
+    loadingMessage: string;
+    scan: SiteScan | null;
+    error: string | null;
+}>({
+    open: false,
+    site: null,
+    loading: false,
+    loadingMessage: '',
+    scan: null,
+    error: null
+});
+
+// Global allowlist (loaded when the scan modal opens).
+const scanAllowlist = ref<AllowlistEntry[]>([]);
+
+const SCAN_STATUS_LABELS: Record<ScanStatus, string> = {
+    clean: 'Clean',
+    warning: 'Check',
+    compromised: 'At risk',
+    error: 'Scan error',
+    unknown: 'Not scanned'
+};
+
+const scanStatusLabel = (status?: ScanStatus | null) => SCAN_STATUS_LABELS[status || 'unknown'];
+
+// Severity ordering so findings render worst-first.
+const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+
+const sortedFindings = (scan: SiteScan | null): ScanFinding[] =>
+    [...(scan?.findings || [])].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+
+const scanTooltip = (site: Site): string => {
+    const scan = site.latestScan;
+    if (!scan) return 'Security scan not run yet — click to scan';
+    const when = scan.createdAt ? ` · scanned ${new Date(scan.createdAt).toLocaleString()}` : '';
+    if (scan.status === 'clean') return `No issues found${when}`;
+    if (scan.status === 'compromised') return `${scan.findingsCount || 0} issue(s), ${scan.critical || 0} critical${when}`;
+    if (scan.status === 'error') return `${scan.error || 'Scan could not complete'}${when}`;
+    return `${scan.findingsCount || 0} item(s) need review${when}`;
+};
+
+// Recompute the modal's scan summary + dashboard badge after findings change locally
+// (e.g. a path was allowlisted) without re-scanning the container.
+const recomputeScanSummary = () => {
+    const scan = scanModal.value.scan;
+    if (!scan) return;
+    const fs = scan.findings || [];
+    scan.findingsCount = fs.length;
+    scan.critical = fs.filter(f => f.severity === 'critical').length;
+    const has = (s: Severity) => fs.some(f => f.severity === s);
+    scan.status = (has('critical') || has('high'))
+        ? 'compromised'
+        : (has('medium') || has('low'))
+            ? 'warning'
+            : ((scan.coreStatus === 'unverified' || scan.coreStatus === 'error') ? 'warning' : 'clean');
+    const card = sites.value.find(s => s.id === scanModal.value.site?.id);
+    if (card && card.latestScan) {
+        card.latestScan = { ...card.latestScan, status: scan.status, findingsCount: scan.findingsCount, critical: scan.critical };
+    }
+};
+
+// Drop currently-allowlisted paths from the displayed scan so an old stored result
+// reflects the live allowlist immediately.
+const applyAllowlistLocally = () => {
+    const scan = scanModal.value.scan;
+    if (!scan) return;
+    const ignored = new Set(scanAllowlist.value.map(a => `${a.category}::${a.path}`));
+    scan.findings = (scan.findings || [])
+        .map(f => ({ ...f, paths: f.paths.filter(p => !ignored.has(`${f.category}::${p}`)) }))
+        .filter(f => f.category === 'core_unverified' || f.paths.length > 0);
+    recomputeScanSummary();
+};
+
+const openScanModal = async (site: Site) => {
+    scanModal.value = {
+        open: true, site, loading: true,
+        loadingMessage: 'Loading latest scan…', scan: null, error: null
+    };
+    try { scanAllowlist.value = await getAllowlist(); } catch { scanAllowlist.value = []; }
+    try {
+        const result = await getScan(site.id);
+        scanModal.value.scan = result;
+        applyAllowlistLocally();
+    } catch (e: any) {
+        // 404 = never scanned yet; that's an empty state, not an error.
+        if (/no scan|not found/i.test(e.message || '')) {
+            scanModal.value.scan = null;
+        } else {
+            scanModal.value.error = e.message || 'Could not load scan.';
+        }
+    } finally {
+        scanModal.value.loading = false;
+        scanModal.value.loadingMessage = '';
+    }
+};
+
+// Allowlist a specific flagged path; remove it from the current view immediately.
+const ignorePath = async (finding: ScanFinding, path: string) => {
+    try {
+        await addAllowlist(finding.category, path);
+        finding.paths = finding.paths.filter(p => p !== path);
+        if (scanModal.value.scan) {
+            scanModal.value.scan.findings = (scanModal.value.scan.findings || [])
+                .filter(f => f.category === 'core_unverified' || f.paths.length > 0);
+            recomputeScanSummary();
+        }
+        try { scanAllowlist.value = await getAllowlist(); } catch {}
+        success('Allowlisted', `${path} will be ignored in future scans on all sites.`);
+    } catch (e: any) {
+        error('Could not allowlist', e.message || 'Try again');
+    }
+};
+
+const removeAllowlistEntry = async (entry: AllowlistEntry) => {
+    try {
+        await removeAllowlist(entry.id);
+        scanAllowlist.value = scanAllowlist.value.filter(a => a.id !== entry.id);
+        success('Removed', `${entry.path} will be flagged again on the next scan.`);
+    } catch (e: any) {
+        error('Could not remove', e.message || 'Try again');
+    }
+};
+
+const runScan = async () => {
+    const site = scanModal.value.site;
+    if (!site) return;
+    scanModal.value.loading = true;
+    scanModal.value.loadingMessage = 'Scanning… verifying checksums and inspecting files';
+    scanModal.value.error = null;
+    try {
+        const result = await scanSite(site.id);
+        scanModal.value.scan = result;
+        // Keep the dashboard badge in sync immediately (WS will also push this).
+        const card = sites.value.find(s => s.id === site.id);
+        if (card) card.latestScan = result;
+        if (result.status === 'clean') {
+            success('Scan complete', `${site.label}: no issues found.`);
+        } else if (result.status === 'compromised') {
+            error('Possible compromise', `${site.label}: ${result.critical || 0} critical, ${result.findingsCount || 0} total.`);
+        } else if (result.status === 'error') {
+            error('Scan error', result.error || 'Scan could not complete.');
+        } else {
+            success('Scan complete', `${site.label}: ${result.findingsCount || 0} item(s) to review.`);
+        }
+    } catch (e: any) {
+        scanModal.value.error = e.message || 'Scan failed.';
+    } finally {
+        scanModal.value.loading = false;
+        scanModal.value.loadingMessage = '';
     }
 };
 
@@ -485,6 +722,8 @@ const handleModalKeydown = (e: KeyboardEvent) => {
         closeModal();
     } else if (wpAdminModal.value.open) {
         wpAdminModal.value.open = false;
+    } else if (scanModal.value.open) {
+        scanModal.value.open = false;
     }
 };
 
@@ -711,6 +950,9 @@ useJobUpdates((update) => {
     } else if (update.type === 'site:health' && update.siteId && update.health) {
         const site = sites.value.find(s => s.id === update.siteId);
         if (site) site.health = update.health as SiteHealth;
+    } else if (update.type === 'site:scan' && update.siteId && update.scan) {
+        const site = sites.value.find(s => s.id === update.siteId);
+        if (site) site.latestScan = update.scan as SiteScan;
     }
 });
 
@@ -882,6 +1124,20 @@ onUnmounted(() => {
                             SSL {{ (sslDaysRemaining(site.health) as number) <= 0 ? 'expired' : `${sslDaysRemaining(site.health)}d` }}
                         </span>
                         <StatusBadge :status="getSiteStatus(site)" size="sm" />
+                        <!-- WordPress security scan badge -->
+                        <button
+                            v-if="site.siteType === 'wordpress' && site.wpContainer"
+                            class="scan-badge"
+                            :class="`scan-${site.latestScan?.status || 'unknown'}`"
+                            :title="scanTooltip(site)"
+                            aria-label="WordPress integrity scan"
+                            @click="openScanModal(site)"
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                            </svg>
+                            <span>{{ scanStatusLabel(site.latestScan?.status) }}</span>
+                        </button>
                         <!-- Quick Links -->
                         <div class="quick-links" v-if="site.editorUrl || site.siteUrl || site.siteType === 'wordpress'">
                             <a 
@@ -1445,7 +1701,7 @@ onUnmounted(() => {
                                         <line x1="12" y1="8" x2="12" y2="12"/>
                                         <line x1="12" y1="16" x2="12.01" y2="16"/>
                                     </svg>
-                                    <span>{{ wpAdminModal.credentials ? 'Something went wrong' : 'No stored credentials' }}</span>
+                                    <span>{{ wpAdminModal.credentials || wpAdminModal.setupResult ? 'Something went wrong' : 'No stored credentials' }}</span>
                                 </div>
                                 <p class="error-message">{{ wpAdminModal.error }}</p>
 
@@ -1454,9 +1710,31 @@ onUnmounted(() => {
                                     <pre class="debug-output">{{ wpAdminModal.debug }}</pre>
                                 </details>
 
+                                <!-- Per-step setup output, if a setup attempt happened -->
+                                <div v-if="wpAdminModal.setupResult" class="setup-results">
+                                    <div class="setup-results-header" :class="{ ok: wpAdminModal.setupResult.success, fail: !wpAdminModal.setupResult.success }">
+                                        {{ wpAdminModal.setupResult.success ? 'Setup complete' : 'Setup finished with errors' }}
+                                    </div>
+                                    <ul class="setup-steps">
+                                        <li v-for="step in wpAdminModal.setupResult.steps" :key="step.name" :class="{ ok: step.success, fail: !step.success, skipped: step.skipped }">
+                                            <span class="step-dot">{{ step.skipped ? '○' : (step.success ? '✓' : '✕') }}</span>
+                                            <div class="step-body">
+                                                <div class="step-name">{{ step.name }}<span v-if="step.skipped" class="step-tag">already done</span></div>
+                                                <details v-if="step.output" class="step-details" :open="!step.success && !step.skipped">
+                                                    <summary>output</summary>
+                                                    <pre>{{ step.output }}</pre>
+                                                </details>
+                                            </div>
+                                        </li>
+                                    </ul>
+                                </div>
+
                                 <div class="modal-actions">
                                     <button class="btn btn-secondary" @click="wpAdminModal.open = false">Close</button>
-                                    <button class="btn btn-primary" @click="wpRotatePassword">
+                                    <button class="btn btn-secondary" @click="wpSetupMagic" :disabled="wpAdminModal.loading">
+                                        {{ wpAdminModal.setupResult ? 'Retry setup' : 'Set up magic login' }}
+                                    </button>
+                                    <button class="btn btn-primary" @click="wpRotatePassword" :disabled="wpAdminModal.loading">
                                         Create WebSync admin
                                     </button>
                                 </div>
@@ -1511,6 +1789,14 @@ onUnmounted(() => {
                                 <div class="modal-actions">
                                     <button
                                         class="btn btn-secondary"
+                                        @click="wpSetupMagic"
+                                        :disabled="wpAdminModal.loading"
+                                        title="Install + configure the magic-login plugin in this site's WordPress container"
+                                    >
+                                        Set up magic login
+                                    </button>
+                                    <button
+                                        class="btn btn-secondary"
                                         @click="wpRotatePassword"
                                         :disabled="wpAdminModal.loading"
                                     >
@@ -1526,6 +1812,154 @@ onUnmounted(() => {
                                         </svg>
                                         One-click login
                                     </button>
+                                </div>
+
+                                <!-- Magic login setup results -->
+                                <div v-if="wpAdminModal.setupResult" class="setup-results">
+                                    <div class="setup-results-header" :class="{ ok: wpAdminModal.setupResult.success, fail: !wpAdminModal.setupResult.success }">
+                                        {{ wpAdminModal.setupResult.success ? 'Setup complete' : 'Setup finished with errors' }}
+                                    </div>
+                                    <ul class="setup-steps">
+                                        <li v-for="step in wpAdminModal.setupResult.steps" :key="step.name" :class="{ ok: step.success, fail: !step.success, skipped: step.skipped }">
+                                            <span class="step-dot">{{ step.skipped ? '○' : (step.success ? '✓' : '✕') }}</span>
+                                            <div class="step-body">
+                                                <div class="step-name">{{ step.name }}<span v-if="step.skipped" class="step-tag">already done</span></div>
+                                                <details v-if="step.output" class="step-details">
+                                                    <summary>output</summary>
+                                                    <pre>{{ step.output }}</pre>
+                                                </details>
+                                            </div>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+        </Teleport>
+
+        <!-- WordPress Integrity Scan Modal -->
+        <Teleport to="body">
+            <Transition name="modal">
+                <div v-if="scanModal.open" class="modal-overlay">
+                    <div class="modal-content modal-sm scan-modal">
+                        <div class="modal-header">
+                            <h2>Integrity Scan<span v-if="scanModal.site" class="scan-site-name"> · {{ scanModal.site.label }}</span></h2>
+                            <button class="modal-close" @click="scanModal.open = false">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"/>
+                                    <line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                            </button>
+                        </div>
+
+                        <div class="modal-body">
+                            <div v-if="scanModal.loading" class="loading-state-sm">
+                                <div class="spinner"></div>
+                                <span>{{ scanModal.loadingMessage || 'Working…' }}</span>
+                            </div>
+
+                            <!-- Error state -->
+                            <div v-else-if="scanModal.error" class="wp-admin-error">
+                                <div class="error-header">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="10"/>
+                                        <line x1="12" y1="8" x2="12" y2="12"/>
+                                        <line x1="12" y1="16" x2="12.01" y2="16"/>
+                                    </svg>
+                                    <span>Scan error</span>
+                                </div>
+                                <p class="error-message">{{ scanModal.error }}</p>
+                                <div class="modal-actions">
+                                    <button class="btn btn-secondary" @click="scanModal.open = false">Close</button>
+                                    <button class="btn btn-primary" @click="runScan">Try again</button>
+                                </div>
+                            </div>
+
+                            <!-- Never scanned -->
+                            <div v-else-if="!scanModal.scan" class="scan-empty">
+                                <p>
+                                    This site hasn’t been scanned yet. A scan verifies WordPress core &amp; plugin
+                                    files against the official WordPress.org checksums, and looks for malware
+                                    signatures, executable PHP in your uploads folder, and recently-changed files.
+                                </p>
+                                <div class="modal-actions">
+                                    <button class="btn btn-secondary" @click="scanModal.open = false">Close</button>
+                                    <button class="btn btn-primary" @click="runScan">Scan now</button>
+                                </div>
+                            </div>
+
+                            <!-- Results -->
+                            <div v-else class="scan-results">
+                                <div class="scan-summary" :class="`scan-${scanModal.scan.status}`">
+                                    <div class="scan-summary-status">{{ scanStatusLabel(scanModal.scan.status) }}</div>
+                                    <div class="scan-summary-detail">
+                                        <template v-if="scanModal.scan.status === 'clean'">
+                                            No issues found. Core &amp; plugin files verify against official checksums.
+                                        </template>
+                                        <template v-else-if="scanModal.scan.status === 'error'">
+                                            {{ scanModal.scan.error || 'Scan could not complete.' }}
+                                        </template>
+                                        <template v-else>
+                                            {{ scanModal.scan.findingsCount || 0 }} finding(s)<span v-if="scanModal.scan.critical">, {{ scanModal.scan.critical }} critical</span>.
+                                        </template>
+                                    </div>
+                                </div>
+
+                                <div class="scan-meta">
+                                    <span v-if="scanModal.scan.coreStatus">Core: {{ scanModal.scan.coreStatus }}</span>
+                                    <span v-if="scanModal.scan.pluginStatus">Plugins: {{ scanModal.scan.pluginStatus }}</span>
+                                    <span v-if="scanModal.scan.createdAt">Scanned {{ new Date(scanModal.scan.createdAt).toLocaleString() }}</span>
+                                </div>
+
+                                <ul class="findings-list" v-if="sortedFindings(scanModal.scan).length">
+                                    <li
+                                        v-for="(f, i) in sortedFindings(scanModal.scan)"
+                                        :key="i"
+                                        class="finding"
+                                        :class="`sev-${f.severity}`"
+                                    >
+                                        <div class="finding-head">
+                                            <span class="sev-tag">{{ f.severity }}</span>
+                                            <span class="finding-title">{{ f.title }}</span>
+                                            <span class="finding-count" v-if="f.paths.length">{{ f.paths.length }}</span>
+                                        </div>
+                                        <p class="finding-detail">{{ f.detail }}</p>
+                                        <details v-if="f.paths.length" class="finding-paths" :open="f.severity === 'critical' || f.severity === 'high'">
+                                            <summary>Affected files ({{ f.paths.length }})</summary>
+                                            <ul class="path-list">
+                                                <li v-for="p in f.paths" :key="p">
+                                                    <code>{{ p }}</code>
+                                                    <button
+                                                        class="path-ignore"
+                                                        title="Allowlist this file — ignore it in future scans on all sites"
+                                                        @click="ignorePath(f, p)"
+                                                    >Ignore</button>
+                                                </li>
+                                            </ul>
+                                        </details>
+                                        <p class="finding-fix"><strong>Fix:</strong> {{ f.remediation }}</p>
+                                    </li>
+                                </ul>
+
+                                <!-- Allowlist management -->
+                                <details v-if="scanAllowlist.length" class="allowlist-section">
+                                    <summary>Allowlisted items ({{ scanAllowlist.length }})</summary>
+                                    <p class="allowlist-hint">These are ignored in scans across all your sites.</p>
+                                    <ul class="allowlist-list">
+                                        <li v-for="a in scanAllowlist" :key="a.id">
+                                            <span class="sev-tag">{{ a.category }}</span>
+                                            <code>{{ a.path }}</code>
+                                            <span v-if="a.builtin" class="builtin-tag" title="Managed by WebSync — cannot be removed">built-in</span>
+                                            <button v-else class="path-ignore" title="Remove from allowlist" @click="removeAllowlistEntry(a)">Remove</button>
+                                        </li>
+                                    </ul>
+                                </details>
+
+                                <div class="modal-actions">
+                                    <button class="btn btn-secondary" @click="scanModal.open = false">Close</button>
+                                    <button class="btn btn-primary" @click="runScan" :disabled="scanModal.loading">Scan again</button>
                                 </div>
                             </div>
                         </div>
@@ -1888,6 +2322,7 @@ onUnmounted(() => {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
+    gap: var(--space-3);
     padding: var(--space-5);
     border-bottom: 1px solid var(--border-primary);
 }
@@ -1896,12 +2331,18 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     gap: var(--space-3);
+    flex: 1;
+    min-width: 0;
+    flex-wrap: wrap;
 }
 
 .site-name {
     font-size: var(--text-lg);
     font-weight: var(--font-semibold);
     color: var(--text-primary);
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow-wrap: anywhere;
 }
 
 /* Health indicators */
@@ -1939,11 +2380,82 @@ onUnmounted(() => {
 
 .header-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
 
+/* Magic-login setup results */
+.setup-results {
+    margin-top: var(--space-4);
+    padding: var(--space-4);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+}
+.setup-results-header {
+    font-weight: var(--font-semibold);
+    margin-bottom: var(--space-3);
+    font-size: var(--text-sm);
+}
+.setup-results-header.ok { color: var(--color-success); }
+.setup-results-header.fail { color: var(--color-danger); }
+
+.setup-steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+.setup-steps li {
+    display: flex;
+    gap: var(--space-3);
+    align-items: flex-start;
+    font-size: var(--text-sm);
+}
+.setup-steps .step-dot {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    font-weight: bold;
+    font-size: 12px;
+    line-height: 1;
+}
+.setup-steps li.ok .step-dot { background: var(--color-success-subtle); color: var(--color-success); }
+.setup-steps li.fail .step-dot { background: var(--color-danger-subtle); color: var(--color-danger); }
+.setup-steps li.skipped .step-dot { background: var(--bg-tertiary); color: var(--text-muted); }
+
+.setup-steps .step-body { flex: 1; min-width: 0; }
+.setup-steps .step-name { color: var(--text-primary); }
+.setup-steps .step-tag {
+    margin-left: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+}
+.setup-steps .step-details {
+    margin-top: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+.setup-steps .step-details pre {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2);
+    overflow-x: auto;
+    margin-top: var(--space-1);
+    max-height: 160px;
+}
+
 /* Quick Links */
 .quick-links {
-  display: flex;
+    display: flex;
     gap: var(--space-2);
-    margin-left: var(--space-2);
+    flex-shrink: 0;
 }
 
 .quick-link {
@@ -1984,6 +2496,7 @@ onUnmounted(() => {
 .card-actions {
     display: flex;
     gap: var(--space-1);
+    flex-shrink: 0;
 }
 
 .icon-btn {
@@ -2209,6 +2722,13 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
     gap: var(--space-5);
+}
+
+.modal-body {
+    padding: var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
 }
 
 .form-group {
@@ -2902,5 +3422,157 @@ code.info-value {
     .received-sites-grid {
         grid-template-columns: 1fr;
     }
+}
+
+/* ===== Integrity scan badge (site card) ===== */
+.scan-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    border: none;
+    border-radius: var(--radius-full);
+    font-size: 0.625rem;
+    font-weight: var(--font-medium);
+    cursor: pointer;
+    transition: opacity var(--transition-fast, 0.15s);
+}
+.scan-badge:hover { opacity: 0.85; }
+.scan-badge svg { width: 12px; height: 12px; }
+.scan-clean { background: var(--color-success-subtle); color: var(--color-success); }
+.scan-warning { background: var(--color-warning-subtle); color: var(--color-warning); }
+.scan-compromised { background: var(--color-danger-subtle); color: var(--color-danger); }
+.scan-error,
+.scan-unknown { background: var(--bg-tertiary); color: var(--text-muted); }
+
+/* ===== Scan modal ===== */
+.scan-site-name { color: var(--text-muted); font-weight: var(--font-medium); }
+.scan-modal .modal-body { max-height: 70vh; overflow-y: auto; }
+.scan-empty p { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
+
+.scan-summary {
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-3);
+}
+.scan-summary.scan-clean { background: var(--color-success-subtle); }
+.scan-summary.scan-warning { background: var(--color-warning-subtle); }
+.scan-summary.scan-compromised { background: var(--color-danger-subtle); }
+.scan-summary.scan-error,
+.scan-summary.scan-unknown { background: var(--bg-tertiary); }
+.scan-summary-status { font-weight: var(--font-semibold); font-size: var(--text-sm); }
+.scan-summary.scan-clean .scan-summary-status { color: var(--color-success); }
+.scan-summary.scan-warning .scan-summary-status { color: var(--color-warning); }
+.scan-summary.scan-compromised .scan-summary-status { color: var(--color-danger); }
+.scan-summary-detail { color: var(--text-secondary); font-size: var(--text-xs); margin-top: 2px; }
+
+.scan-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    margin-bottom: var(--space-4);
+}
+
+.findings-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.finding {
+    border: 1px solid var(--border);
+    border-left-width: 3px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-3);
+    background: var(--bg-secondary);
+}
+.finding.sev-critical { border-left-color: var(--color-danger); }
+.finding.sev-high { border-left-color: var(--color-danger); }
+.finding.sev-medium { border-left-color: var(--color-warning); }
+.finding.sev-low { border-left-color: var(--color-warning); }
+.finding.sev-info { border-left-color: var(--text-muted); }
+
+.finding-head { display: flex; align-items: center; gap: var(--space-2); }
+.sev-tag {
+    text-transform: uppercase;
+    font-size: 0.5625rem;
+    font-weight: var(--font-semibold);
+    letter-spacing: 0.04em;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-full);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+.sev-critical .sev-tag,
+.sev-high .sev-tag { background: var(--color-danger-subtle); color: var(--color-danger); }
+.sev-medium .sev-tag,
+.sev-low .sev-tag { background: var(--color-warning-subtle); color: var(--color-warning); }
+.finding-title { font-weight: var(--font-medium); font-size: var(--text-sm); color: var(--text-primary); }
+.finding-count {
+    margin-left: auto;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-full);
+    padding: 0 var(--space-2);
+}
+.finding-detail { color: var(--text-secondary); font-size: var(--text-xs); margin: var(--space-2) 0; line-height: 1.5; }
+.finding-paths { margin: var(--space-2) 0; }
+.finding-paths summary { cursor: pointer; font-size: var(--text-xs); color: var(--text-muted); }
+.finding-paths pre {
+    margin-top: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.finding-fix { font-size: var(--text-xs); color: var(--text-secondary); line-height: 1.5; margin: var(--space-2) 0 0; }
+.finding-fix strong { color: var(--text-primary); }
+
+/* Per-path list with allowlist buttons */
+.path-list { list-style: none; padding: 0; margin: var(--space-2) 0 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.path-list li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+}
+.path-list code {
+    flex: 1;
+    font-size: var(--text-xs);
+    word-break: break-all;
+}
+.path-ignore {
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    font-size: 0.625rem;
+    font-weight: var(--font-medium);
+    padding: 2px var(--space-2);
+    cursor: pointer;
+}
+.path-ignore:hover { color: var(--text-primary); border-color: var(--text-muted); }
+
+/* Allowlist management section */
+.allowlist-section { margin-top: var(--space-4); border-top: 1px solid var(--border); padding-top: var(--space-3); }
+.allowlist-section summary { cursor: pointer; font-size: var(--text-sm); font-weight: var(--font-medium); color: var(--text-secondary); }
+.allowlist-hint { font-size: var(--text-xs); color: var(--text-muted); margin: var(--space-2) 0; }
+.allowlist-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.allowlist-list li { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) 0; }
+.allowlist-list code { flex: 1; font-size: var(--text-xs); word-break: break-all; }
+.builtin-tag {
+    flex-shrink: 0;
+    font-size: 0.5625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-full);
+    padding: 2px var(--space-2);
 }
 </style>

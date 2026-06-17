@@ -24,8 +24,18 @@ export interface SiteHealthPayload {
     lastCheckedAt: string | null;
 }
 
+export interface SiteScanPayload {
+    id: string;
+    status: 'clean' | 'warning' | 'compromised' | 'error' | 'unknown';
+    coreStatus: string | null;
+    pluginStatus: string | null;
+    findingsCount: number;
+    critical: number;
+    createdAt: string;
+}
+
 export interface JobUpdate {
-    type: 'connected' | 'pong' | 'job:started' | 'job:progress' | 'job:completed' | 'job:failed' | 'site:health';
+    type: 'connected' | 'pong' | 'job:started' | 'job:progress' | 'job:completed' | 'job:failed' | 'site:health' | 'site:scan';
     job?: any;
     jobId?: string;
     progress?: number;
@@ -33,6 +43,7 @@ export interface JobUpdate {
     error?: string;
     siteId?: string;
     health?: SiteHealthPayload;
+    scan?: SiteScanPayload;
 }
 
 type JobUpdateHandler = (update: JobUpdate) => void;

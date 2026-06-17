@@ -53,6 +53,7 @@ model Site {
   jobs            Job[]
   wpCredential    WpAdminCredential?
   health          SiteHealth?
+  scans           SiteScan[]
 }
 
 // Per-site uptime / SSL monitoring
@@ -67,6 +68,34 @@ model SiteHealth {
   error         String?
   lastCheckedAt DateTime?
   updatedAt     DateTime @updatedAt
+}
+
+// Per-site WordPress integrity / malware scan results (one row per scan = history)
+model SiteScan {
+  id            String   @id @default(uuid())
+  siteId        String
+  site          Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  status        String   @default("unknown")  // clean | warning | compromised | error | unknown
+  coreStatus    String?  // ok | modified | unverified | error | skipped
+  pluginStatus  String?  // ok | modified | unverified | error | skipped
+  findingsCount Int      @default(0)
+  critical      Int      @default(0)
+  findings      String?  // JSON: [{category, severity, title, paths[], detail, remediation}]
+  durationMs    Int?
+  error         String?
+  createdAt     DateTime @default(now())
+  @@index([siteId, createdAt])
+}
+
+// Global allowlist of known-good scan findings to suppress in future scans.
+// Keyed by finding category + path (file path or plugin slug). Applies to every site.
+model ScanAllowlist {
+  id        String   @id @default(uuid())
+  category  String   // core_modified | core_unexpected | core_missing | plugin_modified | plugin_unverified | signature | uploads_php | recent_changes
+  path      String   // file path or plugin slug, as reported in the finding
+  note      String?
+  createdAt DateTime @default(now())
+  @@unique([category, path])
 }
 
 // Dashboard user account

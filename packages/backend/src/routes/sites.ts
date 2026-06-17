@@ -4,7 +4,8 @@ import { syncFiles, syncDatabase, canSync, SyncDirection, notifyRemoteOfSync } f
 import prisma from '../lib/prisma';
 import { refreshScheduler } from '../lib/scheduler';
 import { broadcastJobUpdate } from '../lib/websocket';
-import { generateWpAdmin, deleteWpAdmin, generateMagicLoginUrl, executeCommand } from '../lib/docker';
+import { generateWpAdmin, deleteWpAdmin, generateMagicLoginUrl, executeCommand, setupMagicLogin } from '../lib/docker';
+import { runSiteScan, BUILTIN_ALLOWLIST_ENTRIES } from '../lib/securityScanner';
 import { encrypt, decrypt } from '../lib/crypto';
 import { logAudit } from '../lib/audit';
 import { runHealthCheckCycle } from '../lib/healthMonitor';
@@ -51,15 +52,21 @@ const SiteSchema = z.object({
 export default async function siteRoutes(server: FastifyInstance) {
     // List all sites
     server.get('/sites', async () => {
-        return prisma.site.findMany({
+        const sites = await prisma.site.findMany({
             include: {
                 jobs: {
                     orderBy: { startedAt: 'desc' },
                     take: 1
                 },
-                health: true
+                health: true,
+                scans: {
+                    orderBy: { createdAt: 'desc' },
+                    take: 1
+                }
             }
         });
+        // Flatten the latest scan into `latestScan` so the dashboard doesn't deal with arrays.
+        return sites.map(({ scans, ...site }) => ({ ...site, latestScan: scans[0] || null }));
     });
 
     // Get single site
@@ -72,11 +79,16 @@ export default async function siteRoutes(server: FastifyInstance) {
                     orderBy: { startedAt: 'desc' },
                     take: 10
                 },
-                health: true
+                health: true,
+                scans: {
+                    orderBy: { createdAt: 'desc' },
+                    take: 1
+                }
             }
         });
         if (!site) return reply.status(404).send({ error: 'Site not found' });
-        return site;
+        const { scans, ...rest } = site;
+        return { ...rest, latestScan: scans[0] || null };
     });
 
     // Create site
@@ -453,6 +465,23 @@ export default async function siteRoutes(server: FastifyInstance) {
         };
     });
 
+    // Run the magic-login setup sequence inside a WordPress container.
+    // Idempotent — install steps are skipped when already present.
+    server.post('/sites/:id/wp-admin/setup', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const site = await prisma.site.findUnique({ where: { id } });
+        if (!site) return reply.status(404).send({ error: 'Site not found' });
+        if (site.siteType !== 'wordpress') {
+            return reply.status(400).send({ error: 'Site is not a WordPress site' });
+        }
+        if (!site.wpContainer) {
+            return reply.status(400).send({ error: 'WordPress container not configured.' });
+        }
+        const result = await setupMagicLogin(site.wpContainer, site.wpPath || '/var/www/html');
+        await logAudit(request, 'wp.setupMagic', site.id, { success: result.success });
+        return result;
+    });
+
     // Generate a one-time magic login URL for the stored WP admin.
     // If no stored credential exists yet (and no websync_admin user in WP),
     // bootstrap one transparently so the first click "just works".
@@ -549,5 +578,113 @@ export default async function siteRoutes(server: FastifyInstance) {
         await prisma.wpAdminCredential.deleteMany({ where: { siteId: site.id, username } });
 
         return { success: true, message: `User ${username} deleted` };
+    });
+
+    // ==========================================
+    // WordPress Integrity / Malware Scanning
+    // ==========================================
+
+    // Parse the stored findings JSON back into objects for the API.
+    const shapeScan = (scan: { findings: string | null; [k: string]: any }) => ({
+        ...scan,
+        findings: scan.findings ? JSON.parse(scan.findings) : [],
+    });
+
+    // Run an on-demand integrity / malware scan and return the result.
+    server.post('/sites/:id/scan', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const site = await prisma.site.findUnique({ where: { id } });
+        if (!site) return reply.status(404).send({ error: 'Site not found' });
+        if (site.siteType !== 'wordpress') {
+            return reply.status(400).send({ error: 'Site is not a WordPress site' });
+        }
+        if (!site.wpContainer) {
+            return reply.status(400).send({ error: 'WordPress container not configured.' });
+        }
+
+        const result = await runSiteScan({
+            id: site.id,
+            label: site.label,
+            siteType: site.siteType,
+            wpContainer: site.wpContainer,
+            wpPath: site.wpPath,
+        });
+
+        await logAudit(request, 'security.scan', site.id, {
+            status: result.status,
+            findingsCount: result.findingsCount,
+            critical: result.critical,
+        });
+
+        return result;
+    });
+
+    // Latest scan result for a site (with parsed findings).
+    server.get('/sites/:id/scan', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const scan = await prisma.siteScan.findFirst({
+            where: { siteId: id },
+            orderBy: { createdAt: 'desc' },
+        });
+        if (!scan) return reply.status(404).send({ error: 'No scan yet — run one to begin.' });
+        return shapeScan(scan);
+    });
+
+    // Recent scan history for a site.
+    server.get('/sites/:id/scans', async (request) => {
+        const { id } = request.params as { id: string };
+        const scans = await prisma.siteScan.findMany({
+            where: { siteId: id },
+            orderBy: { createdAt: 'desc' },
+            take: 20,
+        });
+        return scans.map(shapeScan);
+    });
+
+    // ==========================================
+    // Scan allowlist (global — applies to all sites)
+    // ==========================================
+
+    const AllowlistSchema = z.object({
+        category: z.string().min(1),
+        path: z.string().min(1),
+        note: z.string().nullish(),
+    });
+
+    // List allowlist entries (user-defined first, then built-ins).
+    server.get('/scan-allowlist', async () => {
+        const rows = await prisma.scanAllowlist.findMany({ orderBy: { createdAt: 'desc' } });
+        return [
+            ...rows.map(r => ({ ...r, builtin: false })),
+            ...BUILTIN_ALLOWLIST_ENTRIES,
+        ];
+    });
+
+    // Add (or update the note of) an allowlist entry.
+    server.post('/scan-allowlist', async (request, reply) => {
+        const body = AllowlistSchema.parse(request.body);
+        if (BUILTIN_ALLOWLIST_ENTRIES.some(e => e.category === body.category && e.path === body.path)) {
+            return reply.status(409).send({ error: 'Already allowlisted (built-in).' });
+        }
+        const entry = await prisma.scanAllowlist.upsert({
+            where: { category_path: { category: body.category, path: body.path } },
+            update: { note: body.note ?? undefined },
+            create: { category: body.category, path: body.path, note: body.note ?? null },
+        });
+        await logAudit(request, 'security.allowlist.add', null, { category: body.category, path: body.path });
+        return { ...entry, builtin: false };
+    });
+
+    // Remove an allowlist entry (built-ins cannot be removed).
+    server.delete('/scan-allowlist/:id', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        if (id.startsWith('builtin:')) {
+            return reply.status(400).send({ error: 'Built-in allowlist entries cannot be removed.' });
+        }
+        const existing = await prisma.scanAllowlist.findUnique({ where: { id } });
+        if (!existing) return reply.status(404).send({ error: 'Entry not found' });
+        await prisma.scanAllowlist.delete({ where: { id } });
+        await logAudit(request, 'security.allowlist.remove', null, { category: existing.category, path: existing.path });
+        return { success: true };
     });
 }

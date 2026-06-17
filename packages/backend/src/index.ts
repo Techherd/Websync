@@ -17,6 +17,7 @@ import { registerAuthRoutes, authMiddleware } from './middleware/auth';
 import { startScheduler } from './lib/scheduler';
 import { startHealthChecker } from './lib/healthChecker';
 import { startSiteHealthMonitor } from './lib/healthMonitor';
+import { startSecurityScanner } from './lib/securityScanner';
 import prisma from './lib/prisma';
 
 const server = Fastify({
@@ -77,6 +78,7 @@ server.addHook('preHandler', async (request, reply) => {
         // Only skip if it looks like a frontend route (not an API call)
         const isApiRoute = url.startsWith('/auth/') ||
                           url.startsWith('/sites') ||
+                          url.startsWith('/scan-allowlist') ||
                           url.startsWith('/jobs') ||
                           url.startsWith('/settings') ||
                           url.startsWith('/users') ||
@@ -120,6 +122,7 @@ if (isProduction) {
         server.setNotFoundHandler(async (request, reply) => {
             // If it's an API route, return 404
             if (request.url.startsWith('/sites') ||
+                request.url.startsWith('/scan-allowlist') ||
                 request.url.startsWith('/jobs') ||
                 request.url.startsWith('/settings') ||
                 request.url.startsWith('/auth') ||
@@ -150,6 +153,7 @@ if (isProduction) {
 startScheduler();
 startHealthChecker();
 startSiteHealthMonitor();
+startSecurityScanner();
 
 const start = async () => {
     try {
