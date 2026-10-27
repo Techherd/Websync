@@ -18,6 +18,12 @@ interface Settings {
     remoteHealthy: boolean;
     lastHealthCheck: string | null;
     hideBranding: boolean;
+    // Site provisioning (New site wizard)
+    provisionSitesRoot: string;
+    provisionWebPortStart: number;
+    provisionHostIp: string;
+    wordpressImage: string;
+    staticImage: string;
 }
 
 interface HealthStatus {
@@ -28,7 +34,9 @@ interface HealthStatus {
     lastCheck: string | null;
 }
 
-const { request } = useApi();
+const { request, getMe } = useApi();
+// Settings are owner-only on the server; managers see them read-only
+const isOwner = ref(true);
 const { success, error } = useToast();
 const { setHideBranding } = useAppSettings();
 
@@ -49,7 +57,12 @@ const settings = ref<Settings>({
     healthCheckInterval: 30,
     remoteHealthy: false,
     lastHealthCheck: null,
-    hideBranding: false
+    hideBranding: false,
+    provisionSitesRoot: '/mnt/user/appdata/websites',
+    provisionWebPortStart: 8100,
+    provisionHostIp: '',
+    wordpressImage: 'althe3rd/wordpress-with-cli:latest',
+    staticImage: 'nginx:alpine'
 });
 const configured = ref(false);
 const remoteHealth = ref<HealthStatus>({
@@ -87,7 +100,12 @@ const loadSettings = async () => {
                 healthCheckInterval: data.healthCheckInterval || 30,
                 remoteHealthy: data.remoteHealthy || false,
                 lastHealthCheck: data.lastHealthCheck || null,
-                hideBranding: data.hideBranding ?? false
+                hideBranding: data.hideBranding ?? false,
+                provisionSitesRoot: data.provisionSitesRoot || '/mnt/user/appdata/websites',
+                provisionWebPortStart: data.provisionWebPortStart || 8100,
+                provisionHostIp: data.provisionHostIp || '',
+                wordpressImage: data.wordpressImage || 'althe3rd/wordpress-with-cli:latest',
+                staticImage: data.staticImage || 'nginx:alpine'
             };
             configured.value = !!data.remoteHost;
         }
@@ -164,7 +182,12 @@ const handleSubmit = async () => {
             syncDirection: settings.value.syncDirection,
             syncOnlyWhenHealthy: settings.value.syncOnlyWhenHealthy,
             healthCheckInterval: settings.value.healthCheckInterval,
-            hideBranding: settings.value.hideBranding
+            hideBranding: settings.value.hideBranding,
+            provisionSitesRoot: settings.value.provisionSitesRoot,
+            provisionWebPortStart: settings.value.provisionWebPortStart,
+            provisionHostIp: settings.value.provisionHostIp || null,
+            wordpressImage: settings.value.wordpressImage,
+            staticImage: settings.value.staticImage
         });
         configured.value = true;
         success('Settings Saved', 'Configuration updated successfully');
@@ -195,6 +218,7 @@ const startHealthPoll = () => {
 };
 
 onMounted(async () => {
+    getMe().then(me => { isOwner.value = me.role === 'owner'; }).catch(() => {});
     await loadSettings();
     startHealthPoll();
 });
@@ -534,6 +558,48 @@ onUnmounted(() => {
                 </div>
             </div>
 
+            <!-- Site provisioning -->
+            <div class="form-section">
+                <div class="section-header">
+                    <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="12" y1="5" x2="12" y2="19"/>
+                        <line x1="5" y1="12" x2="19" y2="12"/>
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                    </svg>
+                    <div>
+                        <h3>Site Provisioning</h3>
+                        <p>Defaults for the New site wizard</p>
+                    </div>
+                </div>
+
+                <div class="form-grid">
+                    <div class="form-group full-width">
+                        <label class="form-label" for="provisionSitesRoot">Sites folder</label>
+                        <input id="provisionSitesRoot" v-model="settings.provisionSitesRoot" type="text" class="form-input mono" placeholder="/mnt/user/appdata/websites" />
+                        <p class="form-hint">Where new site folders go, as WebSync sees it. It must be on a volume mounted into the WebSync container. Databases go next to it, in <code>&lt;name&gt;-mariadb</code>.</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="provisionHostIp">Server LAN IP</label>
+                        <input id="provisionHostIp" v-model="settings.provisionHostIp" type="text" class="form-input" placeholder="192.168.1.161" />
+                        <p class="form-hint">Used for a new site's address when no domain is entered</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="provisionWebPortStart">First web port</label>
+                        <input id="provisionWebPortStart" v-model.number="settings.provisionWebPortStart" type="number" class="form-input" min="1024" max="65000" />
+                        <p class="form-hint">New sites get the next free port from here</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="wordpressImage">WordPress image</label>
+                        <input id="wordpressImage" v-model="settings.wordpressImage" type="text" class="form-input mono" />
+                        <p class="form-hint">Must include WP-CLI</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="staticImage">Static site image</label>
+                        <input id="staticImage" v-model="settings.staticImage" type="text" class="form-input mono" />
+                    </div>
+                </div>
+            </div>
+
             <!-- UI Preferences -->
             <div class="form-section">
                 <div class="section-header">
@@ -551,7 +617,8 @@ onUnmounted(() => {
             </div>
 
             <div class="form-actions">
-                <button type="submit" class="btn btn-primary" :disabled="saving">
+                <span v-if="!isOwner" class="form-hint">Only owners can change settings.</span>
+                <button type="submit" class="btn btn-primary" :disabled="saving || !isOwner">
                     <span v-if="saving" class="spinner-sm"></span>
                     <span>{{ saving ? 'Saving...' : 'Save Settings' }}</span>
                 </button>
@@ -1023,6 +1090,13 @@ onUnmounted(() => {
 .form-actions {
     display: flex;
     justify-content: flex-end;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.form-input.mono,
+.form-hint code {
+    font-family: var(--font-mono);
 }
 
 /* Buttons */

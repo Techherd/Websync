@@ -9,12 +9,12 @@ const NewUserSchema = z.object({
     email: z.string().email().transform(s => s.toLowerCase()),
     name: z.string().min(1),
     password: z.string().min(8),
-    role: z.enum(['owner', 'viewer']).optional()
+    role: z.enum(['owner', 'manager', 'viewer']).optional()
 });
 
 const UpdateUserSchema = z.object({
     name: z.string().min(1).optional(),
-    role: z.enum(['owner', 'viewer']).optional(),
+    role: z.enum(['owner', 'manager', 'viewer']).optional(),
     password: z.string().min(8).optional()
 });
 
@@ -65,6 +65,12 @@ export default async function userRoutes(server: FastifyInstance) {
         const parsed = UpdateUserSchema.safeParse(request.body);
         if (!parsed.success) {
             return reply.status(400).send({ error: parsed.error.issues[0]?.message || 'Invalid input' });
+        }
+        if (parsed.data.role && parsed.data.role !== 'owner') {
+            const target = await prisma.user.findUnique({ where: { id } });
+            if (target?.role === 'owner' && await prisma.user.count({ where: { role: 'owner' } }) <= 1) {
+                return reply.status(400).send({ error: 'Cannot change the role of the last owner' });
+            }
         }
         const data: { name?: string; role?: string; passwordHash?: string } = {};
         if (parsed.data.name) data.name = parsed.data.name;

@@ -29,6 +29,10 @@ services:
       # Mount your app data directories that need syncing
       # Modify these based on your Unraid setup:
       - /mnt/user/appdata:/mnt/user/appdata
+      # Unraid only: lets the New site wizard write Docker templates (Edit/Update
+      # in the Docker tab) and check that custom networks are preserved
+      - /boot/config/plugins/dockerMan/templates-user:/boot/config/plugins/dockerMan/templates-user
+      - /boot/config/docker.cfg:/boot/config/docker.cfg:ro
     networks:
       - websync-network
     healthcheck:

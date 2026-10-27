@@ -78,6 +78,29 @@ docker-compose up -d
 | `/var/run/docker.sock` | Docker socket for container management |
 | `/root/.ssh` | SSH keys for remote server access (mount as `:ro` for read-only) |
 | `/mnt/user/appdata/websites` | Your website files (adjust path as needed) |
+| `/boot/config/plugins/dockerMan/templates-user` | Unraid only, read/write: lets the **New site** wizard write Docker templates |
+| `/boot/config/docker.cfg` | Unraid only, read-only: lets the wizard check Docker network settings |
+
+---
+
+## Creating New Sites
+
+The **New site** button on the dashboard creates a WordPress or static HTML site from scratch. For WordPress, it creates:
+
+- a folder for the site's files (`<sites folder>/<name>/www`) and one for its database (`<name>-mariadb`)
+- a MariaDB container and a WordPress container (from the image set in **Settings → Site Provisioning**, which must include WP-CLI), joined on a private `websync-sites` Docker network, so the database port is never opened on your LAN
+- Unraid templates for both containers, so they appear in the Docker tab with working **Edit** and **Update**
+- the WebSync site entry, with WordPress installed and a WebSync admin login ready
+
+A static site gets the folder, an nginx container and its template. If any step fails, everything the wizard created is removed.
+
+**Before the first run on Unraid:**
+
+1. Add the two `/boot/config/...` paths above to the WebSync container.
+2. In **Settings → Docker**, stop the Docker service, set **Preserve user defined networks** to **Yes**, and start it again. Without this, Unraid deletes the `websync-sites` network on every Docker restart.
+3. In WebSync, set **Settings → Site Provisioning → Server LAN IP**, so sites without a domain get a usable address.
+
+The wizard checks all of this and explains anything that's missing before it creates anything. Owners and **managers** can create sites. Managers can't change settings or users, or delete sites.
 
 ---
 

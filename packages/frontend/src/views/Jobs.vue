@@ -131,7 +131,7 @@ onMounted(loadJobs);
                 <tbody>
                     <tr v-for="job in jobs" :key="job.id">
                         <td class="site-cell">
-                            <span class="site-name">{{ job.site?.label || 'Unknown' }}</span>
+                            <span class="site-name">{{ job.site?.label || job.label || 'Unknown' }}</span>
                         </td>
                         <td>
                             <span class="job-type">{{ job.type.replace('_', ' ') }}</span>

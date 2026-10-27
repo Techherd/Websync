@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import prisma from '../lib/prisma';
 import crypto from 'crypto';
+import { requireOwner } from '../middleware/auth';
 
 const SettingsSchema = z.object({
     // Server identity
@@ -26,6 +27,13 @@ const SettingsSchema = z.object({
     
     // UI preferences
     hideBranding: z.boolean().default(false),
+
+    // Site provisioning defaults (optional so older clients don't reset them)
+    provisionSitesRoot: z.string().startsWith('/').optional(),
+    provisionWebPortStart: z.number().int().min(1024).max(65000).optional(),
+    provisionHostIp: z.string().nullish(),
+    wordpressImage: z.string().min(1).optional(),
+    staticImage: z.string().min(1).optional(),
 });
 
 // Generate a secure token for API communication between servers
@@ -59,7 +67,7 @@ export default async function settingsRoutes(server: FastifyInstance) {
     });
 
     // Update settings (creates if doesn't exist)
-    server.put('/settings', async (request, reply) => {
+    server.put('/settings', { preHandler: requireOwner }, async (request, reply) => {
         const body = SettingsSchema.parse(request.body);
         
         const settings = await prisma.settings.upsert({
@@ -76,6 +84,11 @@ export default async function settingsRoutes(server: FastifyInstance) {
                 syncOnlyWhenHealthy: body.syncOnlyWhenHealthy,
                 healthCheckInterval: body.healthCheckInterval,
                 hideBranding: body.hideBranding,
+                provisionSitesRoot: body.provisionSitesRoot,
+                provisionWebPortStart: body.provisionWebPortStart,
+                provisionHostIp: body.provisionHostIp === undefined ? undefined : (body.provisionHostIp || null),
+                wordpressImage: body.wordpressImage,
+                staticImage: body.staticImage,
             },
             create: {
                 id: 'default',
@@ -90,6 +103,11 @@ export default async function settingsRoutes(server: FastifyInstance) {
                 syncOnlyWhenHealthy: body.syncOnlyWhenHealthy,
                 healthCheckInterval: body.healthCheckInterval,
                 hideBranding: body.hideBranding,
+                provisionSitesRoot: body.provisionSitesRoot,
+                provisionWebPortStart: body.provisionWebPortStart,
+                provisionHostIp: body.provisionHostIp === undefined ? undefined : (body.provisionHostIp || null),
+                wordpressImage: body.wordpressImage,
+                staticImage: body.staticImage,
             }
         });
         
@@ -97,7 +115,7 @@ export default async function settingsRoutes(server: FastifyInstance) {
     });
 
     // Generate a new API token for this server
-    server.post('/settings/generate-token', async () => {
+    server.post('/settings/generate-token', { preHandler: requireOwner }, async () => {
         const token = generateApiToken();
         
         await prisma.settings.update({

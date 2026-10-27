@@ -99,6 +99,10 @@ volumes:
   
   # Your app data (modify as needed)
   - /mnt/user/appdata:/mnt/user/appdata
+
+  # Unraid only, for the New site wizard (see README → Creating New Sites)
+  - /boot/config/plugins/dockerMan/templates-user:/boot/config/plugins/dockerMan/templates-user
+  - /boot/config/docker.cfg:/boot/config/docker.cfg:ro
 ```
 
 ### Initial Settings

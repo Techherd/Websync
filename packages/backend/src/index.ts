@@ -11,6 +11,7 @@ import settingsRoutes from './routes/settings';
 import jobRoutes from './routes/jobs';
 import userRoutes from './routes/users';
 import auditRoutes from './routes/audit';
+import provisionRoutes from './routes/provision';
 import { receivedSitesRoutes } from './routes/received-sites';
 import { registerWebSocket } from './lib/websocket';
 import { registerAuthRoutes, authMiddleware } from './middleware/auth';
@@ -83,6 +84,7 @@ server.addHook('preHandler', async (request, reply) => {
                           url.startsWith('/settings') ||
                           url.startsWith('/users') ||
                           url.startsWith('/audit') ||
+                          url.startsWith('/provision') ||
                           url.startsWith('/remote-containers') ||
                           url.startsWith('/received-sites') ||
                           url === '/ws' ||
@@ -106,6 +108,7 @@ server.register(settingsRoutes);
 server.register(jobRoutes);
 server.register(userRoutes);
 server.register(auditRoutes);
+server.register(provisionRoutes);
 server.register(receivedSitesRoutes);
 
 // Serve static frontend in production
@@ -128,6 +131,7 @@ if (isProduction) {
                 request.url.startsWith('/auth') ||
                 request.url.startsWith('/users') ||
                 request.url.startsWith('/audit') ||
+                request.url.startsWith('/provision') ||
                 request.url.startsWith('/remote-containers') ||
                 request.url.startsWith('/received-sites') ||
                 request.url.startsWith('/ws')) {

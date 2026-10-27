@@ -6,6 +6,7 @@ import { useToast } from '../composables/useToast';
 import StatusBadge from '../components/StatusBadge.vue';
 import SyncProgress from '../components/SyncProgress.vue';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
+import NewSiteWizard from '../components/NewSiteWizard.vue';
 
 interface Site {
   id: string;
@@ -35,6 +36,7 @@ interface Site {
     remoteDbUser?: string;
     remoteDbPassword?: string;
     remoteDbName?: string;
+    provisioned?: boolean;
     jobs?: any[];
     health?: SiteHealth | null;
     latestScan?: SiteScan | null;
@@ -115,7 +117,7 @@ interface ReceivedSite {
     totalSize?: string;
 }
 
-const { getSites, createSite, updateSite, deleteSite, syncSite, scanSite, getScan, getAllowlist, addAllowlist, removeAllowlist, getReceivedSites, deleteReceivedSite, request } = useApi();
+const { getSites, createSite, updateSite, deleteSite, syncSite, scanSite, getScan, getAllowlist, addAllowlist, removeAllowlist, getReceivedSites, deleteReceivedSite, getMe, request } = useApi();
 const { success, error } = useToast();
 
 const sites = ref<Site[]>([]);
@@ -134,6 +136,17 @@ const syncDirection = computed(() => settingsStatus.value.syncDirection);
 
 // Health check polling
 let healthPollInterval: number | null = null;
+
+// Current user's role: owners and managers can create sites; only owners delete them
+const userRole = ref<string | null>(null);
+const canProvision = computed(() => userRole.value === 'owner' || userRole.value === 'manager');
+const canDelete = computed(() => userRole.value === 'owner');
+
+// New Site wizard
+const showWizard = ref(false);
+const onSiteProvisioned = async () => {
+    await loadData();
+};
 
 // Modal state
 const showModal = ref(false);
@@ -986,6 +999,7 @@ const recheckHealth = async () => {
 };
 
 onMounted(async () => {
+    getMe().then(me => { userRole.value = me.role; }).catch(() => {});
     await loadData();
     startHealthPolling();
     window.addEventListener('keydown', handleModalKeydown);
@@ -1046,12 +1060,15 @@ onUnmounted(() => {
                     </svg>
                     Recheck health
                 </button>
-                <button class="btn btn-primary" @click="openAddModal">
+                <button class="btn btn-secondary" @click="openAddModal" title="Add a site whose containers already exist">
+                    Add existing site
+                </button>
+                <button v-if="canProvision" class="btn btn-primary" @click="showWizard = true">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="12" y1="5" x2="12" y2="19"/>
                         <line x1="5" y1="12" x2="19" y2="12"/>
                     </svg>
-                    Add Site
+                    New site
                 </button>
             </div>
     </div>
@@ -1068,14 +1085,17 @@ onUnmounted(() => {
                 <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
             </svg>
             <h3>No sites configured</h3>
-            <p>Add your first site to start syncing files between servers</p>
-            <button class="btn btn-primary" @click="openAddModal">
+            <p>Create a new site, or add one that already exists, to start syncing files between servers</p>
+            <button v-if="canProvision" class="btn btn-primary" @click="showWizard = true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="12" y1="5" x2="12" y2="19"/>
                     <line x1="5" y1="12" x2="19" y2="12"/>
                 </svg>
-                Add Site
-          </button>
+                New site
+            </button>
+            <button class="btn btn-secondary" @click="openAddModal">
+                Add existing site
+            </button>
         </div>
 
         <!-- Sites Grid -->
@@ -1124,6 +1144,7 @@ onUnmounted(() => {
                             SSL {{ (sslDaysRemaining(site.health) as number) <= 0 ? 'expired' : `${sslDaysRemaining(site.health)}d` }}
                         </span>
                         <StatusBadge :status="getSiteStatus(site)" size="sm" />
+                        <span v-if="site.provisioned" class="provisioned-badge" title="Created by WebSync's New site wizard">Provisioned</span>
                         <!-- WordPress security scan badge -->
                         <button
                             v-if="site.siteType === 'wordpress' && site.wpContainer"
@@ -1197,7 +1218,7 @@ onUnmounted(() => {
                                 <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                             </svg>
                         </button>
-                        <button class="icon-btn icon-btn-danger" @click="confirmDelete(site)" title="Delete">
+                        <button v-if="canDelete" class="icon-btn icon-btn-danger" @click="confirmDelete(site)" title="Delete">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <polyline points="3 6 5 6 21 6"/>
                                 <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -1648,6 +1669,9 @@ onUnmounted(() => {
     </div>
             </Transition>
         </Teleport>
+
+        <!-- New Site wizard -->
+        <NewSiteWizard :open="showWizard" @close="showWizard = false" @created="onSiteProvisioned" />
 
         <!-- Delete Confirmation -->
         <ConfirmDialog
@@ -3438,6 +3462,16 @@ code.info-value {
     transition: opacity var(--transition-fast, 0.15s);
 }
 .scan-badge:hover { opacity: 0.85; }
+.provisioned-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-full);
+    font-size: 0.625rem;
+    font-weight: var(--font-medium);
+    background: var(--color-primary-subtle);
+    color: var(--color-primary);
+}
 .scan-badge svg { width: 12px; height: 12px; }
 .scan-clean { background: var(--color-success-subtle); color: var(--color-success); }
 .scan-warning { background: var(--color-warning-subtle); color: var(--color-warning); }

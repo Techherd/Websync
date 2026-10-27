@@ -197,3 +197,14 @@ export const requireOwner = async (request: FastifyRequest, reply: FastifyReply)
         return reply.status(403).send({ error: 'Owner role required' });
     }
 };
+
+/**
+ * preHandler allowing any of the given roles. Managers can provision and run
+ * sites; settings, users and site deletion stay behind `requireOwner`.
+ */
+export const requireRole = (...roles: string[]) =>
+    async (request: FastifyRequest, reply: FastifyReply) => {
+        if (!request.user || !roles.includes(request.user.role)) {
+            return reply.status(403).send({ error: `Requires role: ${roles.join(' or ')}` });
+        }
+    };

@@ -93,6 +93,18 @@ const handleResetPassword = async (user: User) => {
     }
 };
 
+const handleRoleChange = async (user: User, role: string) => {
+    if (role === user.role) return;
+    try {
+        await updateUser(user.id, { role });
+        success('Role updated', `${user.email} is now ${role === 'owner' ? 'an owner' : 'a manager'}`);
+        await load();
+    } catch (e: any) {
+        error('Could not change role', e.message || 'Try again');
+        await load();
+    }
+};
+
 const handleDelete = async () => {
     const user = deleteConfirm.value.user;
     if (!user) return;
@@ -140,6 +152,16 @@ onMounted(load);
                     </div>
                 </div>
                 <div class="user-actions" v-if="isOwner">
+                    <select
+                        v-if="me && u.id !== me.id"
+                        class="role-select"
+                        :value="u.role"
+                        :aria-label="`Role for ${u.name}`"
+                        @change="handleRoleChange(u, ($event.target as HTMLSelectElement).value)"
+                    >
+                        <option value="owner">Owner</option>
+                        <option value="manager">Manager</option>
+                    </select>
                     <button class="btn-sm btn-secondary" @click="handleResetPassword(u)">Reset password</button>
                     <button
                         v-if="me && u.id !== me.id"
@@ -182,6 +204,7 @@ onMounted(load);
                                 <label class="form-label">Role</label>
                                 <select v-model="newUser.role" class="form-input">
                                     <option value="owner">Owner (full access)</option>
+                                    <option value="manager">Manager (create and run sites; no settings, users or deleting sites)</option>
                                 </select>
                             </div>
                             <div class="modal-actions">
@@ -319,6 +342,15 @@ onMounted(load);
 }
 .role-owner { background: var(--color-success-subtle); color: var(--color-success); }
 .role-viewer { background: var(--bg-tertiary); color: var(--text-secondary); }
+.role-manager { background: var(--color-primary-subtle); color: var(--color-primary); }
+.role-select {
+    padding: var(--space-1) var(--space-2);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-md);
+    font-size: var(--text-xs);
+    color: var(--text-primary);
+}
 
 .user-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
 

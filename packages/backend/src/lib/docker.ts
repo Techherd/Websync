@@ -1,7 +1,10 @@
 import Docker from 'dockerode';
 import crypto from 'crypto';
 
-const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+// DOCKER_SOCKET lets local dev point at e.g. Docker Desktop's ~/.docker/run/docker.sock
+const docker = new Docker({ socketPath: process.env.DOCKER_SOCKET || '/var/run/docker.sock' });
+
+export const getDocker = () => docker;
 
 export const listContainers = async () => {
     return docker.listContainers({ all: true });
@@ -66,37 +69,10 @@ export const generateWpAdmin = async (
     try {
         logs.push(`Container: ${containerName}`);
         logs.push(`WP Path: ${wpPath}`);
-        
-        // Step 1: Check if WP-CLI is available in the container
-        let wpCliPath = '';
-        try {
-            const whichResult = await executeCommand(containerName, ['sh', '-c', 'which wp 2>/dev/null || echo "not found"']);
-            logs.push(`which wp: ${whichResult}`);
-            
-            if (whichResult && !whichResult.includes('not found')) {
-                wpCliPath = whichResult.trim();
-            }
-        } catch (e: any) {
-            logs.push(`which wp error: ${e.message}`);
-        }
-        
-        // Step 2: Check common WP-CLI locations if not in PATH
-        if (!wpCliPath) {
-            const commonPaths = ['/usr/local/bin/wp', '/usr/bin/wp', `${wpPath}/wp-cli.phar`];
-            for (const path of commonPaths) {
-                try {
-                    const checkResult = await executeCommand(containerName, ['sh', '-c', `test -f ${path} && echo "exists" || echo "not found"`]);
-                    logs.push(`Check ${path}: ${checkResult}`);
-                    if (checkResult.includes('exists')) {
-                        wpCliPath = path;
-                        break;
-                    }
-                } catch (e) {
-                    // Continue checking
-                }
-            }
-        }
-        
+
+        // Step 1-2: Locate WP-CLI (and repair a broken packages dir if needed)
+        const wpCliPath = await findWpCli(containerName, wpPath);
+
         if (!wpCliPath) {
             logs.push('WP-CLI not found in container');
             return {
@@ -108,15 +84,19 @@ export const generateWpAdmin = async (
         
         logs.push(`Using WP-CLI at: ${wpCliPath}`);
         
-        // Step 3: Verify WordPress is installed at the path
-        const wpCheckCmd = `cd ${wpPath} && ${wpCliPath} core is-installed --allow-root 2>&1`;
+        // Step 3: Verify WordPress is installed at the path. Go by exit code, not
+        // output text — PHP warnings from plugins routinely contain "error".
+        const wpCheckCmd = `cd ${wpPath} && ${wpCliPath} core is-installed --allow-root 2>&1; echo "__EXIT_$?"`;
         const wpCheckResult = await executeCommand(containerName, ['sh', '-c', wpCheckCmd]);
         logs.push(`WP check: ${wpCheckResult}`);
-        
-        if (wpCheckResult.toLowerCase().includes('error') || wpCheckResult.toLowerCase().includes('not installed')) {
+
+        if (!wpCheckResult.includes('__EXIT_0')) {
+            const detail = filterPhpNoise(wpCheckResult.replace(/__EXIT_\d+/, ''));
             return {
                 success: false,
-                error: `WordPress not found at ${wpPath}. Check the WP Path setting.`,
+                error: detail
+                    ? `WP-CLI could not load WordPress at ${wpPath}: ${detail.split('\n')[0]}`
+                    : `WordPress not found at ${wpPath}. Check the WP Path setting.`,
                 debug: logs.join('\n')
             };
         }
@@ -196,10 +176,50 @@ const filterPhpNoise = (output: string): string =>
         .join('\n')
         .trim();
 
+// Shell expression (not JS-interpolated) for WP-CLI's community packages dir.
+const WP_CLI_PACKAGES_DIR = '"${WP_CLI_PACKAGES_DIR:-$HOME/.wp-cli/packages}"';
+
+const isBrokenPackagesOutput = (output: string): boolean =>
+    /fatal error/i.test(output) && output.includes('.wp-cli/packages');
+
 /**
- * Locate the WP-CLI binary inside a container, checking $PATH and common install paths.
+ * A half-finished `wp package install` leaves Composer's autoloader pointing at
+ * files that don't exist, and every WP-CLI command then dies with a fatal
+ * before it ever touches WordPress. Detect that and move the packages dir aside
+ * (kept as `packages.broken-<timestamp>`) so WP-CLI works again. The magic-login
+ * package is reinstalled on demand afterwards.
+ */
+export const repairWpCliPackages = async (
+    containerName: string,
+    wpCli: string
+): Promise<{ repaired: boolean; error?: string }> => {
+    const versionCmd = ['sh', '-c', `${wpCli} cli version --allow-root 2>&1`];
+    if (!isBrokenPackagesOutput(await executeCommand(containerName, versionCmd))) {
+        return { repaired: false };
+    }
+    await executeCommand(containerName, [
+        'sh', '-c',
+        `d=${WP_CLI_PACKAGES_DIR}; mv "$d" "$d.broken-$(date +%s)" 2>&1`
+    ]);
+    const after = await executeCommand(containerName, versionCmd);
+    if (isBrokenPackagesOutput(after)) {
+        return { repaired: false, error: 'WP-CLI packages are broken and could not be moved aside' };
+    }
+    console.warn(`Repaired broken WP-CLI packages dir in ${containerName}`);
+    return { repaired: true };
+};
+
+/**
+ * Locate the WP-CLI binary inside a container, checking $PATH and common install
+ * paths. Also repairs a broken WP-CLI packages dir so callers get a working CLI.
  */
 export const findWpCli = async (containerName: string, wpPath: string): Promise<string | null> => {
+    const wpCli = await locateWpCli(containerName, wpPath);
+    if (wpCli) await repairWpCliPackages(containerName, wpCli).catch(() => {});
+    return wpCli;
+};
+
+const locateWpCli = async (containerName: string, wpPath: string): Promise<string | null> => {
     try {
         const which = (await executeCommand(containerName, ['sh', '-c', 'which wp 2>/dev/null || echo ""'])).trim();
         if (which) return which;
@@ -211,6 +231,33 @@ export const findWpCli = async (containerName: string, wpPath: string): Promise<
         } catch {}
     }
     return null;
+};
+
+/**
+ * Install the magic-login CLI package. If the install leaves WP-CLI broken
+ * (e.g. interrupted, or the image can't fetch the package), roll it back so the
+ * rest of WebSync keeps working, and report the failure.
+ */
+const installLoginPackage = async (
+    containerName: string,
+    wpCli: string,
+    wpPath: string
+): Promise<{ success: boolean; output: string }> => {
+    const raw = await executeCommand(containerName, [
+        'sh', '-c',
+        `cd ${wpPath} && ${wpCli} package install aaemnnosttv/wp-cli-login-command --allow-root 2>&1`
+    ]);
+    const output = filterPhpNoise(raw) || raw.trim();
+    const { repaired } = await repairWpCliPackages(containerName, wpCli);
+    if (repaired) {
+        return {
+            success: false,
+            output: `${output}\nPackage install left WP-CLI broken and was rolled back. ` +
+                'It was probably interrupted, or the container could not reach GitHub. Try again.'
+        };
+    }
+    const failed = /(^|\n)error:/i.test(output) && !/(^|\n)success:/i.test(output);
+    return { success: !failed, output };
 };
 
 /**
@@ -240,11 +287,11 @@ export const generateMagicLoginUrl = async (
 
         if (!hasLogin.includes('yes')) {
             // Try to install the login command (and its companion mu-plugin)
-            const installPkg = await executeCommand(containerName, [
-                'sh', '-c',
-                `cd ${wpPath} && ${wpCli} package install aaemnnosttv/wp-cli-login-command --allow-root 2>&1`
-            ]);
-            logs.push(`package install: ${installPkg}`);
+            const installPkg = await installLoginPackage(containerName, wpCli, wpPath);
+            logs.push(`package install: ${installPkg.output}`);
+            if (!installPkg.success) {
+                return { success: false, error: `Could not install magic-login package: ${installPkg.output}`, debug: logs.join('\n') };
+            }
             const installCmd = await executeCommand(containerName, [
                 'sh', '-c',
                 `cd ${wpPath} && ${wpCli} login install --activate --yes --allow-root 2>&1`
@@ -341,11 +388,15 @@ export const setupMagicLogin = async (
     } catch {}
 
     const steps: MagicSetupStep[] = [];
-    steps.push(await run(
-        'Install wp-cli-login-command package',
-        `cd ${wpPath} && ${wpCli} package install aaemnnosttv/wp-cli-login-command --allow-root 2>&1`,
-        pkgInstalled
-    ));
+    const pkgStepName = 'Install wp-cli-login-command package';
+    if (pkgInstalled) {
+        steps.push({ name: pkgStepName, success: true, output: 'Already installed', skipped: true });
+    } else {
+        const pkg = await installLoginPackage(containerName, wpCli, wpPath)
+            .catch((e: any) => ({ success: false, output: e.message || String(e) }));
+        steps.push({ name: pkgStepName, ...pkg });
+        if (!pkg.success) return { success: false, steps };
+    }
     steps.push(await run(
         'Install + activate companion plugin',
         `cd ${wpPath} && ${wpCli} login install --activate --yes --allow-root 2>&1`,

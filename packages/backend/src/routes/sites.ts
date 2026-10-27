@@ -8,6 +8,7 @@ import { generateWpAdmin, deleteWpAdmin, generateMagicLoginUrl, executeCommand, 
 import { runSiteScan, BUILTIN_ALLOWLIST_ENTRIES } from '../lib/securityScanner';
 import { encrypt, decrypt } from '../lib/crypto';
 import { logAudit } from '../lib/audit';
+import { requireOwner } from '../middleware/auth';
 import { runHealthCheckCycle } from '../lib/healthMonitor';
 import { 
     startRemoteContainers, 
@@ -123,7 +124,7 @@ export default async function siteRoutes(server: FastifyInstance) {
     });
 
     // Delete site
-    server.delete('/sites/:id', async (request, reply) => {
+    server.delete('/sites/:id', { preHandler: requireOwner }, async (request, reply) => {
         const { id } = request.params as { id: string };
 
         const existing = await prisma.site.findUnique({ where: { id } });

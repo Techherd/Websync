@@ -48,6 +48,11 @@ model Site {
   remoteDbName      String?
   
   schedule        String?  // Cron expression
+
+  // Set when WebSync created this site's containers itself (New Site wizard)
+  provisioned     Boolean  @default(false)
+  createdById     String?  // User who provisioned the site
+
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   jobs            Job[]
@@ -104,7 +109,7 @@ model User {
   email        String       @unique
   passwordHash String
   name         String
-  role         String       @default("owner")     // owner | viewer (reserved)
+  role         String       @default("owner")     // owner | manager | viewer (reserved)
   createdAt    DateTime     @default(now())
   lastLoginAt  DateTime?
   sessions     Session[]
@@ -150,9 +155,10 @@ model WpAdminCredential {
 
 model Job {
   id        String   @id @default(uuid())
-  siteId    String
-  site      Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
-  type      String   // SYNC_FILE, SYNC_DB, FULL_SYNC, SCHEDULED_SYNC
+  siteId    String?  // null while a PROVISION job hasn't created its site yet
+  site      Site?    @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  label     String?  // Display name for jobs without a site (e.g. failed provisioning)
+  type      String   // SYNC_FILE, SYNC_DB, FULL_SYNC, SCHEDULED_SYNC, PROVISION
   status    String   // PENDING, RUNNING, COMPLETED, FAILED
   logs      String?
   progress  Int?     // 0-100 percentage
@@ -215,6 +221,13 @@ model Settings {
   
   // UI preferences
   hideBranding Boolean @default(false)  // Hide "Powered by Techherd" footer
+
+  // Site provisioning (New Site wizard)
+  provisionSitesRoot    String @default("/mnt/user/appdata/websites")  // Where site folders go, as WebSync sees it
+  provisionWebPortStart Int    @default(8100)  // First host port to try for new site containers
+  provisionHostIp       String?                 // LAN IP used for default site URLs (e.g. 192.168.1.161)
+  wordpressImage        String @default("althe3rd/wordpress-with-cli:latest")
+  staticImage           String @default("nginx:alpine")
   
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
