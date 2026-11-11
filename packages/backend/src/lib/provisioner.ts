@@ -439,9 +439,9 @@ export const provisionSite = async (
                     throw new Error(admin.error || 'Could not create the WebSync admin user');
                 }
                 // WP-CLI installs with "Plain" permalinks and no rewrite rules, which breaks
-                // pretty URLs and the magic-login link. Use the same default as the web installer.
+                // pretty URLs and the magic-login link. Default to "Month and name".
                 await executeCommand(webTemplate.name, ['sh', '-c',
-                    `cd ${WP_ROOT} && wp rewrite structure '/%postname%/' --allow-root 2>&1`]);
+                    `cd ${WP_ROOT} && wp rewrite structure '/%year%/%monthnum%/%postname%/' --allow-root 2>&1`]);
                 if (await ensureWpHtaccess(webTemplate.name, WP_ROOT) === 'failed') {
                     await log('Warning: could not write .htaccess rewrite rules');
                 }
