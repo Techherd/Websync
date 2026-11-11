@@ -48,6 +48,60 @@ export const executeCommand = async (containerName: string, cmd: string[]): Prom
 const WEBSYNC_ADMIN_USERNAME = 'websync_admin';
 
 /**
+ * PHP run via `wp eval-file`: make sure .htaccess has WordPress's standard
+ * front-controller rules. Sites installed by WP-CLI start with "Plain"
+ * permalinks, so WordPress writes an empty block and Apache 404s every pretty
+ * URL, including the magic-login link. The rules only route unknown paths to
+ * index.php; they don't change the site's permalink setting. Prints the result.
+ */
+const HTACCESS_PHP = `<?php
+require_once ABSPATH . 'wp-admin/includes/misc.php';
+$file = ABSPATH . '.htaccess';
+$current = file_exists($file) ? file_get_contents($file) : '';
+if (strpos($current, 'RewriteRule . /index.php') !== false || strpos($current, 'RewriteRule . index.php') !== false) {
+    echo "__HTACCESS_OK__";
+    return;
+}
+$base = parse_url(home_url('/'), PHP_URL_PATH) ?: '/';
+$lines = array(
+    '<IfModule mod_rewrite.c>',
+    'RewriteEngine On',
+    'RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]',
+    'RewriteBase ' . $base,
+    'RewriteRule ^index\\\\.php$ - [L]',
+    'RewriteCond %{REQUEST_FILENAME} !-f',
+    'RewriteCond %{REQUEST_FILENAME} !-d',
+    'RewriteRule . ' . $base . 'index.php [L]',
+    '</IfModule>',
+);
+echo insert_with_markers($file, 'WordPress', $lines) ? "__HTACCESS_FIXED__" : "__HTACCESS_FAILED__";
+`;
+
+/** Check (and optionally repair) the .htaccess rewrite rules. */
+export const ensureWpHtaccess = async (
+    containerName: string,
+    wpPath: string = '/var/www/html',
+    { repair = true }: { repair?: boolean } = {}
+): Promise<'ok' | 'fixed' | 'missing' | 'failed'> => {
+    if (!repair) {
+        const out = await executeCommand(containerName, ['sh', '-c',
+            `grep -qE 'RewriteRule \\. /?[^ ]*index\\.php' ${wpPath}/.htaccess 2>/dev/null && echo yes || echo no`]);
+        return out.includes('yes') ? 'ok' : 'missing';
+    }
+    const b64 = Buffer.from(HTACCESS_PHP).toString('base64');
+    const tmp = `/tmp/websync-htaccess-${Date.now()}.php`;
+    const out = await executeCommand(containerName, ['sh', '-c', [
+        `echo '${b64}' | base64 -d > ${tmp}`,
+        `cd ${wpPath} && wp eval-file ${tmp} --allow-root 2>&1`,
+        `rm -f ${tmp}`,
+        `chown www-data:www-data ${wpPath}/.htaccess 2>/dev/null; true`
+    ].join('; ')]);
+    if (out.includes('__HTACCESS_OK__')) return 'ok';
+    if (out.includes('__HTACCESS_FIXED__')) return 'fixed';
+    return 'failed';
+};
+
+/**
  * WP-CLI runs as root (`--allow-root`), so any folder it creates — the
  * uploads/YYYY/MM tree during `wp core install`, the wp-cli-login-server
  * plugin — ends up owned by root, and Apache (www-data) can't write to it:
@@ -297,6 +351,7 @@ export const generateMagicLoginUrl = async (
             return { success: false, error: 'WP-CLI not found in container', debug: logs.join('\n') };
         }
         logs.push(`wp-cli: ${wpCli}`);
+        logs.push(`htaccess: ${await ensureWpHtaccess(containerName, wpPath).catch(e => `error ${e.message}`)}`);
 
         // Check if the login command is registered
         const hasLogin = await executeCommand(containerName, [

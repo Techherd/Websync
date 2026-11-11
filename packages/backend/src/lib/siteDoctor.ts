@@ -1,4 +1,4 @@
-import { getDocker, executeCommand, locateWpCli, isBrokenPackagesOutput, repairWpCliPackages } from './docker';
+import { getDocker, executeCommand, locateWpCli, isBrokenPackagesOutput, repairWpCliPackages, ensureWpHtaccess } from './docker';
 
 /**
  * Site Doctor: health checks for a site's containers and WordPress install,
@@ -129,6 +129,17 @@ export const runDoctor = async (site: DoctorSite): Promise<DoctorReport> => {
         add({ id: 'ownership', label: 'WordPress can write to wp-content', status: 'ok' });
     }
 
+    // .htaccess rewrite rules (Apache images)
+    const isApache = (await sh(wp, 'command -v apache2 >/dev/null 2>&1 && echo yes || echo no')).includes('yes');
+    if (isApache) {
+        const state = await ensureWpHtaccess(wp, wpPath, { repair: false });
+        add(state === 'ok'
+            ? { id: 'htaccess', label: 'Rewrite rules in .htaccess', status: 'ok' }
+            : { id: 'htaccess', label: 'Rewrite rules in .htaccess', status: 'fail',
+                detail: ".htaccess has no WordPress rewrite rules, so Apache returns \"Not Found\" for pretty links and the one-click login link.",
+                fix: 'Add rewrite rules' });
+    }
+
     // PHP upload limit
     const limits = await sh(wp, `php -r 'echo ini_get("upload_max_filesize")," ",ini_get("post_max_size");' 2>/dev/null`);
     const [uploadMax = '', postMax = ''] = limits.trim().split(/\s+/);
@@ -194,6 +205,12 @@ export const applyFix = async (site: DoctorSite, checkId: string): Promise<strin
         const r = await repairWpCliPackages(wp, wpCli);
         if (r.error) throw new Error(r.error);
         return r.repaired ? 'Moved the broken WP-CLI packages folder aside' : 'WP-CLI was already working';
+    }
+
+    if (checkId === 'htaccess') {
+        const r = await ensureWpHtaccess(wp, wpPath);
+        if (r === 'failed') throw new Error("Couldn't write .htaccess");
+        return r === 'fixed' ? 'Added WordPress rewrite rules to .htaccess' : '.htaccess already had rewrite rules';
     }
 
     if (checkId === 'ownership') {
