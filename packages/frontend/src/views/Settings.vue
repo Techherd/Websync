@@ -36,11 +36,13 @@ interface HealthStatus {
 
 const { request, getMe } = useApi();
 // Settings are owner-only on the server; managers see them read-only
-const isOwner = ref(true);
+const isOwner = ref(false);
 const { success, error } = useToast();
 const { setHideBranding } = useAppSettings();
 
 const loading = ref(true);
+const loaded = ref(false);
+const loadError = ref('');
 const saving = ref(false);
 const testingSsh = ref(false);
 const checkingHealth = ref(false);
@@ -83,10 +85,13 @@ const syncDirectionDescription = computed(() => {
 });
 
 const loadSettings = async () => {
+    if (loading.value && loaded.value) return;
     loading.value = true;
+    loadError.value = '';
     try {
         const data = await request<Settings>('/settings');
         if (data) {
+            loaded.value = true;
             settings.value = {
                 serverName: data.serverName || 'Primary',
                 serverRole: data.serverRole || 'primary',
@@ -109,8 +114,8 @@ const loadSettings = async () => {
             };
             configured.value = !!data.remoteHost;
         }
-    } catch (e) {
-        console.error('Failed to load settings:', e);
+    } catch (e: any) {
+        loadError.value = e.message || 'Please try again.';
     } finally {
         loading.value = false;
     }
@@ -161,14 +166,18 @@ const generateToken = async () => {
     }
 };
 
-const copyToken = () => {
-    if (settings.value.remoteApiToken) {
-        navigator.clipboard.writeText(settings.value.remoteApiToken);
+const copyToken = async () => {
+    if (!settings.value.remoteApiToken) return;
+    try {
+        await navigator.clipboard.writeText(settings.value.remoteApiToken);
         success('Copied', 'API token copied to clipboard');
+    } catch {
+        error('Copy Failed', 'Clipboard access is unavailable. Select the token and copy it manually.');
     }
 };
 
 const handleSubmit = async () => {
+    if (!loaded.value || loading.value || loadError.value || saving.value || !isOwner.value) return;
     saving.value = true;
     try {
         await request('/settings', 'PUT', {
@@ -238,7 +247,7 @@ onUnmounted(() => {
                 <p class="section-subtitle">Configure bidirectional sync between servers</p>
             </div>
             <div class="header-status-group">
-                <div v-if="settings.remoteApiUrl" :class="['health-status', { 'healthy': remoteHealth.healthy, 'unhealthy': !remoteHealth.healthy }]">
+                <div v-if="loaded && settings.remoteApiUrl" :class="['health-status', { 'healthy': remoteHealth.healthy, 'unhealthy': !remoteHealth.healthy }]">
                     <div class="pulse-dot"></div>
                     <span>{{ remoteHealth.healthy ? 'Remote Online' : 'Remote Offline' }}</span>
                 </div>
@@ -249,7 +258,7 @@ onUnmounted(() => {
                     </svg>
                     <span>Configured</span>
                 </div>
-                <div v-else class="config-status not-configured">
+                <div v-else-if="loaded" class="config-status not-configured">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="12" cy="12" r="10"/>
                         <line x1="12" y1="16" x2="12" y2="12"/>
@@ -260,12 +269,17 @@ onUnmounted(() => {
             </div>
         </div>
 
-        <div v-if="loading" class="loading-state">
+        <div v-if="loadError" class="load-notice" role="alert">
+            <p>Could not load settings. {{ loadError }}</p>
+            <p v-if="loaded">Previously loaded settings remain below. Reload settings before saving.</p>
+            <button @click="loadSettings" :disabled="loading">{{ loading ? 'Retrying…' : 'Retry' }}</button>
+        </div>
+        <div v-if="loading && !loaded" class="loading-state" role="status">
             <div class="spinner"></div>
             <span>Loading settings...</span>
         </div>
 
-        <form v-else @submit.prevent="handleSubmit" class="settings-form">
+        <form v-else-if="loaded" @submit.prevent="handleSubmit" class="settings-form">
             <!-- Server Identity Section -->
             <div class="form-section">
                 <div class="section-header">
@@ -618,7 +632,7 @@ onUnmounted(() => {
 
             <div class="form-actions">
                 <span v-if="!isOwner" class="form-hint">Only owners can change settings.</span>
-                <button type="submit" class="btn btn-primary" :disabled="saving || !isOwner">
+                <button type="submit" class="btn btn-primary" :disabled="saving || !isOwner || !!loadError || loading">
                     <span v-if="saving" class="spinner-sm"></span>
                     <span>{{ saving ? 'Saving...' : 'Save Settings' }}</span>
                 </button>

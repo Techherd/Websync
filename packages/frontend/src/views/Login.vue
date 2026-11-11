@@ -16,6 +16,7 @@ const error = ref('');
 const loading = ref(false);
 
 const handleSubmit = async () => {
+    if (loading.value) return;
     error.value = '';
     loading.value = true;
 
@@ -23,7 +24,9 @@ const handleSubmit = async () => {
         await login(email.value.trim(), password.value);
         router.push('/');
     } catch (e: any) {
-        error.value = e.message || 'Invalid email or password';
+        error.value = e instanceof TypeError
+            ? 'Cannot reach the WebSync server. Check your connection and try signing in again.'
+            : e.message || 'Sign-in failed. Please try again.';
     } finally {
         loading.value = false;
     }
@@ -60,7 +63,7 @@ const handleSubmit = async () => {
                             <input
                                 id="email"
                                 v-model="email"
-                                type="email"
+                                type="email" autocomplete="username"
                                 class="form-input"
                                 placeholder="you@example.com"
                                 required
@@ -80,14 +83,14 @@ const handleSubmit = async () => {
                                 v-model="password"
                                 type="password"
                                 class="form-input"
-                                placeholder="Enter your password"
+                                placeholder="Password" autocomplete="current-password"
                                 required
                             />
                         </div>
                         <p class="form-hint">First time? Enter any email — your AUTH_PASSWORD becomes the password and a new owner account is created with this email.</p>
                     </div>
 
-                    <div v-if="error" class="error-message">
+                    <div v-if="error" class="error-message" role="alert">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="10"/>
                             <line x1="15" y1="9" x2="9" y2="15"/>
@@ -96,9 +99,9 @@ const handleSubmit = async () => {
                         <span>{{ error }}</span>
                     </div>
 
-                    <button type="submit" class="login-button" :disabled="loading">
+                    <button type="submit" class="login-button" :disabled="loading" :aria-busy="loading">
                         <span v-if="loading" class="spinner"></span>
-                        <span v-else>Sign In</span>
+                        <span>{{ loading ? 'Signing in…' : 'Sign In' }}</span>
                     </button>
                 </form>
 
@@ -274,7 +277,7 @@ const handleSubmit = async () => {
     width: 100%;
     padding: var(--space-4);
     background: var(--color-primary);
-    color: white;
+    color: var(--text-on-primary);
     border-radius: var(--radius-lg);
     font-size: var(--text-base);
     font-weight: var(--font-semibold);
@@ -311,4 +314,5 @@ const handleSubmit = async () => {
     padding-top: var(--space-6);
     border-top: 1px solid var(--border-primary);
 }
+@media (max-width: 400px) { .login-card { padding: var(--space-6); } }
 </style>

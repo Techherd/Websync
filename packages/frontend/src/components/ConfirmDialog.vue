@@ -1,5 +1,6 @@
 <script setup lang="ts">
-defineProps<{
+import { ref, watch, nextTick, onBeforeUnmount, useId } from 'vue';
+const props = defineProps<{
     open: boolean;
     title: string;
     message: string;
@@ -12,13 +13,43 @@ const emit = defineEmits<{
     confirm: [];
     cancel: [];
 }>();
+
+const dialog = ref<HTMLElement | null>(null);
+const cancelButton = ref<HTMLButtonElement | null>(null);
+const id = useId();
+let trigger: HTMLElement | null = null;
+const restoreFocus = () => { if (trigger?.isConnected) trigger.focus(); };
+const onKeydown = (event: KeyboardEvent) => {
+    if (!props.open) return;
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); emit('cancel'); }
+    if (event.key === 'Tab') {
+        const buttons = dialog.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
+        if (!buttons?.length) return;
+        const first = buttons[0]!;
+        const last = buttons[buttons.length - 1]!;
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+};
+watch(() => props.open, async (open) => {
+    if (open) {
+        trigger = document.activeElement as HTMLElement;
+        document.addEventListener('keydown', onKeydown, true);
+        await nextTick();
+        if (props.open) cancelButton.value?.focus();
+    } else {
+        document.removeEventListener('keydown', onKeydown, true);
+        restoreFocus();
+    }
+}, { immediate: true });
+onBeforeUnmount(() => { document.removeEventListener('keydown', onKeydown, true); if (props.open) restoreFocus(); });
 </script>
 
 <template>
     <Teleport to="body">
         <Transition name="modal">
             <div v-if="open" class="modal-overlay" @click.self="emit('cancel')">
-                <div class="modal-dialog" role="alertdialog" aria-modal="true">
+                <div ref="dialog" class="modal-dialog" role="alertdialog" aria-modal="true" :aria-labelledby="`${id}-title`" :aria-describedby="`${id}-message`">
                     <div class="modal-icon" :class="`icon-${variant || 'primary'}`">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <template v-if="variant === 'danger'">
@@ -38,10 +69,10 @@ const emit = defineEmits<{
                             </template>
                         </svg>
                     </div>
-                    <h2 class="modal-title">{{ title }}</h2>
-                    <p class="modal-message">{{ message }}</p>
+                    <h2 :id="`${id}-title`" class="modal-title">{{ title }}</h2>
+                    <p :id="`${id}-message`" class="modal-message">{{ message }}</p>
                     <div class="modal-actions">
-                        <button class="btn btn-secondary" @click="emit('cancel')">
+                        <button ref="cancelButton" class="btn btn-secondary" @click="emit('cancel')">
                             {{ cancelLabel || 'Cancel' }}
                         </button>
                         <button 
@@ -77,6 +108,9 @@ const emit = defineEmits<{
     max-width: 400px;
     width: 100%;
     text-align: center;
+    max-height: calc(100dvh - 2rem);
+    overflow-y: auto;
+    overflow-wrap: anywhere;
     box-shadow: var(--shadow-xl);
 }
 
@@ -128,6 +162,7 @@ const emit = defineEmits<{
     display: flex;
     gap: var(--space-3);
     justify-content: center;
+    flex-wrap: wrap;
 }
 
 .btn {
@@ -159,7 +194,7 @@ const emit = defineEmits<{
 
 .btn-warning {
     background: var(--color-warning);
-    color: white;
+    color: var(--text-on-warning);
 }
 
 .btn-warning:hover {

@@ -1,22 +1,24 @@
 <script setup lang="ts">
-defineProps<{
+import { computed } from 'vue';
+const props = defineProps<{
     progress: number;
     message?: string;
     animated?: boolean;
 }>();
+const value = computed(() => Number.isFinite(props.progress) ? Math.min(100, Math.max(0, props.progress)) : 0);
 </script>
 
 <template>
     <div class="sync-progress">
         <div class="progress-header">
-            <span class="progress-label">{{ message || 'Syncing...' }}</span>
-            <span class="progress-value">{{ progress }}%</span>
+            <span class="progress-label" role="status">{{ message || 'Syncing...' }}</span>
+            <span class="progress-value">{{ value }}%</span>
         </div>
-        <div class="progress-bar">
+        <div class="progress-bar" role="progressbar" aria-label="Sync progress" :aria-valuenow="value" aria-valuemin="0" aria-valuemax="100">
             <div 
                 class="progress-fill" 
                 :class="{ animated }"
-                :style="{ width: `${progress}%` }"
+                :style="{ width: `${value}%` }"
             ></div>
         </div>
     </div>

@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import prisma from './prisma';
-import { getDocker, executeCommand, generateWpAdmin } from './docker';
+import { getDocker, executeCommand, generateWpAdmin, fixWpContentOwnership } from './docker';
 import { toHostPath } from './hostPaths';
 import { encrypt } from './crypto';
 import { broadcastJobUpdate } from './websocket';
@@ -438,6 +438,8 @@ export const provisionSite = async (
                 if (!admin.success || !admin.username || !admin.password) {
                     throw new Error(admin.error || 'Could not create the WebSync admin user');
                 }
+                // wp core install ran as root and created wp-content/uploads/YYYY/MM as root.
+                await fixWpContentOwnership(webTemplate.name, WP_ROOT);
                 credential = { username: admin.username, password: admin.password };
                 await log(`WordPress installed; admin user ${admin.username}`);
             });

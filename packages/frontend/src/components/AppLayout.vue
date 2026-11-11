@@ -48,9 +48,9 @@ const toggleSidebar = () => {
                     <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
                     </svg>
-                    <span class="logo-text" v-if="!sidebarCollapsed">WebSync</span>
+                    <span class="logo-text">WebSync</span>
                 </div>
-                <button class="sidebar-toggle" @click="toggleSidebar" aria-label="Toggle sidebar">
+                <button class="sidebar-toggle" @click="toggleSidebar" aria-label="Toggle sidebar" :aria-expanded="!sidebarCollapsed" aria-controls="main-navigation">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path v-if="sidebarCollapsed" d="M9 18l6-6-6-6"/>
                         <path v-else d="M15 18l-6-6 6-6"/>
@@ -58,11 +58,11 @@ const toggleSidebar = () => {
                 </button>
             </div>
 
-            <nav class="sidebar-nav">
+            <nav class="sidebar-nav" id="main-navigation" aria-label="Main navigation">
                 <router-link
                     v-for="item in navItems"
                     :key="item.path"
-                    :to="item.path"
+                    :to="item.path" :aria-label="item.label" :title="item.label"
                     class="nav-item"
                     :class="{ active: isActive(item.path) }"
                 >
@@ -91,15 +91,15 @@ const toggleSidebar = () => {
                             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                         </template>
                     </svg>
-                    <span class="nav-label" v-if="!sidebarCollapsed">{{ item.label }}</span>
+                    <span class="nav-label">{{ item.label }}</span>
                 </router-link>
             </nav>
 
             <div class="sidebar-footer">
-                <div class="connection-status" :class="{ connected: isConnected }">
+                <div role="status" :aria-label="isConnected ? 'Live updates connected' : 'Live updates disconnected. Updates may be delayed; reconnecting automatically.'" class="connection-status" :class="{ connected: isConnected }">
                     <span class="status-dot"></span>
-                    <span class="status-text" v-if="!sidebarCollapsed">
-                        {{ isConnected ? 'Connected' : 'Disconnected' }}
+                    <span class="status-text">
+                        {{ isConnected ? 'Connected' : 'Disconnected — reconnecting' }}
                     </span>
                 </div>
             </div>
@@ -143,13 +143,13 @@ const toggleSidebar = () => {
 <style scoped>
 .app-layout {
     display: grid;
-    grid-template-columns: var(--sidebar-width) 1fr;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
     min-height: 100vh;
     transition: grid-template-columns var(--transition-normal);
 }
 
 .app-layout.sidebar-collapsed {
-    grid-template-columns: 72px 1fr;
+    grid-template-columns: 72px minmax(0, 1fr);
 }
 
 /* Sidebar */
@@ -383,6 +383,7 @@ const toggleSidebar = () => {
 }
 
 /* Collapsed state adjustments */
+.sidebar-collapsed .sidebar-nav { padding: var(--space-2); }
 .sidebar-collapsed .logo-text,
 .sidebar-collapsed .nav-label,
 .sidebar-collapsed .status-text {
@@ -420,5 +421,21 @@ const toggleSidebar = () => {
 .sidebar-collapsed .connection-status {
     justify-content: center;
     padding: var(--space-2);
+}
+
+@media (max-width: 767px) {
+    .app-layout, .app-layout.sidebar-collapsed { grid-template-columns: minmax(0, 1fr); }
+    .sidebar { position: static; height: auto; border-right: 0; }
+    .sidebar-header, .sidebar-collapsed .sidebar-header { flex-direction: row; padding: var(--space-3) var(--space-4); }
+    .sidebar-toggle { display: none; }
+    .sidebar-nav { flex-direction: row; flex-wrap: wrap; padding: var(--space-2); flex: none; }
+    .nav-item, .sidebar-collapsed .nav-item { padding: var(--space-2); gap: var(--space-1); }
+    .nav-label, .sidebar-collapsed .nav-label { display: inline; }
+    .sidebar-footer { padding: var(--space-2); }
+    .status-text, .sidebar-collapsed .status-text { display: inline; }
+    .main-wrapper { min-height: 0; min-width: 0; }
+    .app-header { padding: var(--space-3); height: auto; gap: var(--space-2); flex-wrap: wrap; }
+    .header-right { gap: var(--space-2); }
+    .main-content { padding: var(--space-4); min-width: 0; }
 }
 </style>

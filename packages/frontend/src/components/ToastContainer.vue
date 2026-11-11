@@ -22,6 +22,7 @@ const getIcon = (type: string) => {
                     :key="toast.id" 
                     class="toast"
                     :class="`toast-${toast.type}`"
+                    :role="toast.type === 'error' ? 'alert' : 'status'" aria-atomic="true"
                 >
                     <div class="toast-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -72,7 +73,7 @@ const getIcon = (type: string) => {
     flex-direction: column;
     gap: var(--space-3);
     max-width: 400px;
-    width: 100%;
+    width: min(400px, calc(100% - 2 * var(--space-6)));
     pointer-events: none;
 }
 
@@ -135,6 +136,7 @@ const getIcon = (type: string) => {
 .toast-content {
     flex: 1;
     min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .toast-title {

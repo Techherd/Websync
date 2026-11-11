@@ -117,12 +117,21 @@ interface ReceivedSite {
     totalSize?: string;
 }
 
-const { getSites, createSite, updateSite, deleteSite, syncSite, scanSite, getScan, getAllowlist, addAllowlist, removeAllowlist, getReceivedSites, deleteReceivedSite, getMe, request } = useApi();
+const { getSites, createSite, updateSite, deleteSite, syncSite, scanSite, getScan, getDoctorReports, runDoctorAll, runSiteDoctor, fixSiteDoctor, getAllowlist, addAllowlist, removeAllowlist, getReceivedSites, deleteReceivedSite, getMe, request } = useApi();
 const { success, error } = useToast();
 
 const sites = ref<Site[]>([]);
 const receivedSites = ref<ReceivedSite[]>([]);
 const loading = ref(true);
+const sitesLoaded = ref(false);
+const loadError = ref('');
+const receivedError = ref('');
+const receivedLoading = ref(false);
+const statusError = ref('');
+const savingSite = ref(false);
+const startingSync = ref(new Set<string>());
+const terminalJobs = new Map<string, string>();
+let loadVersion = 0;
 const settingsStatus = ref<SettingsStatus>({
     configured: false,
     syncDirection: 'push',
@@ -498,6 +507,112 @@ const runScan = async () => {
     }
 };
 
+// ==========================================
+// Site Doctor: health checks with one-click fixes
+// ==========================================
+type DoctorStatus = 'ok' | 'warn' | 'fail' | 'skip';
+interface DoctorCheck { id: string; label: string; status: DoctorStatus; detail?: string; fix?: string; hint?: string; }
+interface DoctorReport { siteId: string; checkedAt: string; checks: DoctorCheck[]; issues: number; fixable: number; }
+
+const doctorReports = ref<Record<string, DoctorReport>>({});
+const checkingAllSites = ref(false);
+const doctorModal = ref<{
+    open: boolean;
+    site: Site | null;
+    loading: boolean;
+    loadingMessage: string;
+    report: DoctorReport | null;
+    error: string | null;
+}>({ open: false, site: null, loading: false, loadingMessage: '', report: null, error: null });
+
+const setDoctorReport = (report: DoctorReport) => {
+    doctorReports.value = { ...doctorReports.value, [report.siteId]: report };
+};
+
+const doctorBadge = (site: Site): { cls: string; label: string; title: string } => {
+    const r = doctorReports.value[site.id];
+    if (!r) return { cls: 'scan-unknown', label: 'Check', title: 'Run Site Doctor checks' };
+    const failing = r.checks.some(c => c.status === 'fail');
+    const when = ` · checked ${new Date(r.checkedAt).toLocaleString()}`;
+    if (!r.issues) return { cls: 'scan-clean', label: 'Healthy', title: `No problems found${when}` };
+    return {
+        cls: failing ? 'scan-compromised' : 'scan-warning',
+        label: `${r.issues} issue${r.issues === 1 ? '' : 's'}`,
+        title: `${r.issues} problem(s), ${r.fixable} fixable${when}`
+    };
+};
+
+const loadDoctorReports = async () => {
+    try {
+        for (const r of await getDoctorReports()) setDoctorReport(r);
+    } catch { /* badges just show "Check" */ }
+};
+
+const checkAllSites = async () => {
+    if (checkingAllSites.value) return;
+    checkingAllSites.value = true;
+    try {
+        const reports: DoctorReport[] = await runDoctorAll();
+        reports.forEach(setDoctorReport);
+        const withIssues = reports.filter(r => r.issues).length;
+        if (withIssues) error('Site Doctor', `${withIssues} site(s) have problems. Click a site's badge to see and fix them.`);
+        else success('Site Doctor', `All ${reports.length} sites look healthy.`);
+    } catch (e: any) {
+        error('Site Doctor failed', e.message || 'Try again');
+    } finally {
+        checkingAllSites.value = false;
+    }
+};
+
+const runDoctorCheck = async () => {
+    const site = doctorModal.value.site;
+    if (!site) return;
+    doctorModal.value.loading = true;
+    doctorModal.value.loadingMessage = 'Checking containers, files and WordPress…';
+    doctorModal.value.error = null;
+    try {
+        const report: DoctorReport = await runSiteDoctor(site.id);
+        doctorModal.value.report = report;
+        setDoctorReport(report);
+    } catch (e: any) {
+        doctorModal.value.error = e.message || 'Check failed.';
+    } finally {
+        doctorModal.value.loading = false;
+        doctorModal.value.loadingMessage = '';
+    }
+};
+
+const openDoctorModal = async (site: Site) => {
+    doctorModal.value = { open: true, site, loading: false, loadingMessage: '', report: null, error: null };
+    await runDoctorCheck();
+};
+
+const applyDoctorFix = async (checkId?: string) => {
+    const site = doctorModal.value.site;
+    if (!site) return;
+    doctorModal.value.loading = true;
+    doctorModal.value.loadingMessage = checkId ? 'Applying fix…' : 'Applying all fixes…';
+    doctorModal.value.error = null;
+    try {
+        const { results, report } = await fixSiteDoctor(site.id, checkId);
+        doctorModal.value.report = report;
+        setDoctorReport(report);
+        const failed = (results as { success: boolean; message: string }[]).filter(r => !r.success);
+        if (failed.length) error('Some fixes failed', failed.map(f => f.message).join('; '));
+        else success('Fixed', (results as { message: string }[]).map(r => r.message).join('; ') || 'Nothing to fix.');
+    } catch (e: any) {
+        doctorModal.value.error = e.message || 'Fix failed.';
+    } finally {
+        doctorModal.value.loading = false;
+        doctorModal.value.loadingMessage = '';
+    }
+};
+
+const sortedDoctorChecks = (report: DoctorReport | null): DoctorCheck[] => {
+    const order: Record<DoctorStatus, number> = { fail: 0, warn: 1, skip: 2, ok: 3 };
+    return [...(report?.checks || [])].sort((a, b) => order[a.status] - order[b.status]);
+};
+
 const copyToClipboard = async (text: string, label: string) => {
     // navigator.clipboard requires a secure context (HTTPS or localhost).
     // WebSync is usually accessed over plain HTTP on a LAN, so fall back to
@@ -584,24 +699,33 @@ const deleteConfirm = ref({ open: false, siteId: '', siteName: '' });
 // Sync progress tracking
 const syncingJobs = ref<Map<string, { jobId: string; progress: number; message: string }>>(new Map());
 
-const loadData = async () => {
-    loading.value = true;
+const loadReceivedSites = async () => {
+    if (receivedLoading.value) return;
+    receivedLoading.value = true;
     try {
-        const [sitesData, receivedData, statusData] = await Promise.all([
-            getSites(),
-            getReceivedSites().catch(() => []), // Don't fail if received sites endpoint fails
-            request<SettingsStatus>('/settings/status')
-        ]);
-        sites.value = sitesData;
-        receivedSites.value = receivedData || [];
-        if (statusData) {
-            settingsStatus.value = statusData;
-        }
+        receivedSites.value = await getReceivedSites() || [];
+        receivedError.value = '';
     } catch (e: any) {
-        error('Load Failed', e.message || 'Failed to load sites');
-    } finally {
-        loading.value = false;
-    }
+        receivedError.value = e.message || 'Please try again.';
+    } finally { receivedLoading.value = false; }
+};
+
+const loadData = async () => {
+    const version = ++loadVersion;
+    loading.value = true;
+    const results = await Promise.allSettled([getSites(), request<SettingsStatus>('/settings/status'), loadReceivedSites()]);
+    if (version !== loadVersion) return;
+    const [local, status] = results;
+    if (local.status === 'fulfilled') {
+        sites.value = local.value;
+        sitesLoaded.value = true;
+        loadError.value = '';
+    } else { loadError.value = local.reason?.message || 'Please try again.'; }
+    if (status.status === 'fulfilled' && status.value) {
+        settingsStatus.value = status.value;
+        statusError.value = '';
+    } else { statusError.value = 'Could not refresh sync configuration. Reload before starting a sync.'; }
+    loading.value = false;
 };
 
 const handleDeleteReceivedSite = async (site: ReceivedSite) => {
@@ -713,6 +837,7 @@ const openEditModal = (site: Site) => {
 const isFormDirty = () => JSON.stringify(formData.value) !== formSnapshot.value;
 
 const closeModal = () => {
+    if (savingSite.value) return;
     if (isFormDirty()) {
         discardConfirm.value = true;
     } else {
@@ -737,10 +862,14 @@ const handleModalKeydown = (e: KeyboardEvent) => {
         wpAdminModal.value.open = false;
     } else if (scanModal.value.open) {
         scanModal.value.open = false;
+    } else if (doctorModal.value.open) {
+        doctorModal.value.open = false;
     }
 };
 
 const handleSubmit = async () => {
+    if (savingSite.value) return;
+    savingSite.value = true;
     try {
         // Helper to convert empty strings to null for updates (to clear values)
         // or undefined for creates (to omit from insert)
@@ -802,7 +931,7 @@ const handleSubmit = async () => {
         loadData();
     } catch (e: any) {
         error('Save Failed', e.message || 'Failed to save site');
-    }
+    } finally { savingSite.value = false; }
 };
 
 const confirmDelete = (site: Site) => {
@@ -825,6 +954,7 @@ const handleDelete = async () => {
 };
 
 const triggerSync = async (site: Site, direction?: 'push' | 'pull' | 'bidirectional', force?: boolean) => {
+    if (startingSync.value.has(site.id) || syncingJobs.value.has(site.id) || statusError.value) return;
     if (!configuredRemote.value) {
         error('Not Configured', 'Please configure remote host in Settings first');
         return;
@@ -836,17 +966,20 @@ const triggerSync = async (site: Site, direction?: 'push' | 'pull' | 'bidirectio
     }
 
     try {
+        startingSync.value.add(site.id);
         const job = await syncSite(site.id, { direction, force });
-        syncingJobs.value.set(site.id, {
-            jobId: job.id,
-            progress: 0,
-            message: 'Starting sync...'
-        });
+        if (terminalJobs.get(site.id) !== job.id && !syncingJobs.value.has(site.id) && (job.status === 'RUNNING' || job.status === 'PENDING')) {
+            syncingJobs.value.set(site.id, { jobId: job.id, progress: 0, message: 'Sync request accepted. Waiting for progress…' });
+        }
+        // WebSocket events own progress and terminal state. Acceptance alone is not completion.
+        // Do not replace progress already received while awaiting this response.
         const dirLabel = direction || syncDirection.value;
-        success('Sync Started', `${dirLabel.charAt(0).toUpperCase() + dirLabel.slice(1)}ing ${site.label}...`);
+        if (terminalJobs.get(site.id) !== job.id) {
+            success('Sync Requested', `${dirLabel} request accepted for ${site.label}. Check Jobs for progress and the final result.`);
+        }
     } catch (e: any) {
         error('Sync Failed', e.message || 'Failed to start sync');
-    }
+    } finally { startingSync.value.delete(site.id); terminalJobs.delete(site.id); }
 };
 
 // Sync menu state
@@ -950,6 +1083,7 @@ useJobUpdates((update) => {
             }
         }
     } else if ((update.type === 'job:completed' || update.type === 'job:failed') && update.job) {
+        if (startingSync.value.has(update.job.siteId)) terminalJobs.set(update.job.siteId, update.job.id);
         const site = sites.value.find(s => s.id === update.job.siteId);
         if (site) {
             syncingJobs.value.delete(site.id);
@@ -1001,6 +1135,7 @@ const recheckHealth = async () => {
 onMounted(async () => {
     getMe().then(me => { userRole.value = me.role; }).catch(() => {});
     await loadData();
+    loadDoctorReports();
     startHealthPolling();
     window.addEventListener('keydown', handleModalKeydown);
 });
@@ -1036,7 +1171,7 @@ onUnmounted(() => {
         </div>
 
         <!-- Alert Banner -->
-        <div v-if="!configuredRemote && !loading" class="alert-banner">
+        <div v-if="!configuredRemote && !loading && !statusError" class="alert-banner">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
                 <line x1="12" y1="9" x2="12" y2="13"/>
@@ -1049,7 +1184,7 @@ onUnmounted(() => {
         <div class="page-header">
             <div class="header-info">
                 <h2 class="section-title">Sites</h2>
-                <p class="section-subtitle">{{ sites.length }} site{{ sites.length !== 1 ? 's' : '' }} configured</p>
+                <p class="section-subtitle">{{ sitesLoaded ? `${sites.length} site${sites.length !== 1 ? 's' : ''} configured` : loading ? 'Loading site inventory…' : 'Site inventory unavailable' }}</p>
             </div>
             <div class="header-actions">
                 <button class="btn btn-secondary" @click="recheckHealth" title="Run a health check on every site now">
@@ -1059,6 +1194,12 @@ onUnmounted(() => {
                         <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                     </svg>
                     Recheck health
+                </button>
+                <button class="btn btn-secondary" :disabled="checkingAllSites" @click="checkAllSites" title="Run Site Doctor on every site: containers, file permissions, WP-CLI, PHP limits">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+                    </svg>
+                    {{ checkingAllSites ? 'Checking sites…' : 'Check all sites' }}
                 </button>
                 <button class="btn btn-secondary" @click="openAddModal" title="Add a site whose containers already exist">
                     Add existing site
@@ -1073,14 +1214,21 @@ onUnmounted(() => {
             </div>
     </div>
 
+        <div v-if="loadError || statusError" class="load-notice" role="alert">
+            <p v-if="loadError">Could not load sites. {{ loadError }}</p>
+            <p v-if="loadError && sitesLoaded">Showing previously loaded sites; information may be out of date.</p>
+            <p v-if="statusError">{{ statusError }}</p>
+            <button @click="loadData" :disabled="loading">{{ loading ? 'Retrying…' : 'Retry' }}</button>
+        </div>
+        <p v-if="loading && sitesLoaded" role="status">Refreshing sites…</p>
         <!-- Loading State -->
-        <div v-if="loading" class="loading-state">
+        <div v-if="loading && !sitesLoaded" class="loading-state" role="status">
             <div class="spinner"></div>
             <span>Loading sites...</span>
         </div>
 
         <!-- Empty State -->
-        <div v-else-if="sites.length === 0" class="empty-state">
+        <div v-else-if="sitesLoaded && !loadError && sites.length === 0" class="empty-state">
             <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
             </svg>
@@ -1099,7 +1247,7 @@ onUnmounted(() => {
         </div>
 
         <!-- Sites Grid -->
-        <div v-else class="sites-grid">
+        <div v-else-if="sites.length" class="sites-grid">
             <article v-for="site in sites" :key="site.id" class="site-card">
                 <div class="card-header">
                     <div class="card-title-row">
@@ -1158,6 +1306,19 @@ onUnmounted(() => {
                                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                             </svg>
                             <span>{{ scanStatusLabel(site.latestScan?.status) }}</span>
+                        </button>
+                        <!-- Site Doctor badge -->
+                        <button
+                            class="scan-badge"
+                            :class="doctorBadge(site).cls"
+                            :title="doctorBadge(site).title"
+                            aria-label="Site Doctor"
+                            @click="openDoctorModal(site)"
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+                            </svg>
+                            <span>{{ doctorBadge(site).label }}</span>
                         </button>
                         <!-- Quick Links -->
                         <div class="quick-links" v-if="site.editorUrl || site.siteUrl || site.siteType === 'wordpress'">
@@ -1307,7 +1468,7 @@ onUnmounted(() => {
                     <div v-else class="sync-button-group">
                         <button 
                             class="btn btn-sync"
-                            :disabled="!configuredRemote"
+                            :disabled="!configuredRemote || !!statusError || startingSync.has(site.id)" :aria-busy="startingSync.has(site.id)"
                             @click="triggerSync(site)"
                         >
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1315,12 +1476,13 @@ onUnmounted(() => {
                                 <polyline points="1 20 1 14 7 14"/>
                                 <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                             </svg>
-                            <span v-if="syncDirection === 'push'">Push</span>
+                            <span v-if="startingSync.has(site.id)">Starting…</span>
+                            <span v-else-if="syncDirection === 'push'">Push</span>
                             <span v-else-if="syncDirection === 'pull'">Pull</span>
                             <span v-else>Sync</span>
                         </button>
                         <div class="sync-dropdown" v-if="configuredRemote">
-                            <button class="btn btn-sync-dropdown" @click="toggleSyncMenu(site.id)">
+                            <button class="btn btn-sync-dropdown" aria-label="Sync options" :disabled="startingSync.has(site.id) || !!statusError" @click="toggleSyncMenu(site.id)">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <polyline points="6 9 12 15 18 9"/>
                                 </svg>
@@ -1368,6 +1530,11 @@ onUnmounted(() => {
         </div>
 
         <!-- Received Sites Section (read-only, synced from remote) -->
+        <div v-if="receivedError" class="load-notice" role="alert">
+            <p>Could not refresh received sites. {{ receivedError }}</p>
+            <p v-if="receivedSites.length">Previously loaded received sites remain below and may be out of date.</p>
+            <button @click="loadReceivedSites" :disabled="receivedLoading">{{ receivedLoading ? 'Retrying…' : 'Retry received sites' }}</button>
+        </div>
         <div v-if="receivedSites.length > 0" class="received-sites-section">
             <div class="section-header">
                 <div class="section-title">
@@ -1660,8 +1827,8 @@ onUnmounted(() => {
 
                 <div class="modal-actions">
                                 <button type="button" class="btn btn-secondary" @click="closeModal">Cancel</button>
-                                <button type="submit" class="btn btn-primary">
-                                    {{ editingId ? 'Save Changes' : 'Create Site' }}
+                                <button type="submit" class="btn btn-primary" :disabled="savingSite" :aria-busy="savingSite">
+                                    {{ savingSite ? 'Saving…' : editingId ? 'Save Changes' : 'Create Site' }}
                                 </button>
                 </div>
             </form>
@@ -1855,6 +2022,82 @@ onUnmounted(() => {
                                             </div>
                                         </li>
                                     </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+        </Teleport>
+
+        <!-- Site Doctor Modal -->
+        <Teleport to="body">
+            <Transition name="modal">
+                <div v-if="doctorModal.open" class="modal-overlay">
+                    <div class="modal-content modal-sm scan-modal">
+                        <div class="modal-header">
+                            <h2>Site Doctor<span v-if="doctorModal.site" class="scan-site-name"> · {{ doctorModal.site.label }}</span></h2>
+                            <button class="modal-close" @click="doctorModal.open = false">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"/>
+                                    <line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                            </button>
+                        </div>
+
+                        <div class="modal-body">
+                            <div v-if="doctorModal.loading" class="loading-state-sm">
+                                <div class="spinner"></div>
+                                <span>{{ doctorModal.loadingMessage || 'Working…' }}</span>
+                            </div>
+
+                            <div v-else-if="doctorModal.error" class="wp-admin-error">
+                                <p class="error-message">{{ doctorModal.error }}</p>
+                                <div class="modal-actions">
+                                    <button class="btn btn-secondary" @click="doctorModal.open = false">Close</button>
+                                    <button class="btn btn-primary" @click="runDoctorCheck">Try again</button>
+                                </div>
+                            </div>
+
+                            <div v-else-if="doctorModal.report">
+                                <div class="scan-summary" :class="doctorModal.site ? doctorBadge(doctorModal.site).cls : ''">
+                                    <div class="scan-summary-status">
+                                        {{ doctorModal.report.issues ? `${doctorModal.report.issues} problem${doctorModal.report.issues === 1 ? '' : 's'} found` : 'No problems found' }}
+                                    </div>
+                                    <div class="scan-summary-detail">
+                                        Checked {{ new Date(doctorModal.report.checkedAt).toLocaleString() }}
+                                        <span v-if="doctorModal.report.fixable"> · {{ doctorModal.report.fixable }} can be fixed automatically</span>
+                                    </div>
+                                </div>
+
+                                <ul class="doctor-checks">
+                                    <li v-for="check in sortedDoctorChecks(doctorModal.report)" :key="check.id" class="doctor-check" :class="`doctor-${check.status}`">
+                                        <span class="doctor-icon" :aria-label="check.status">{{ { ok: '✓', warn: '!', fail: '✕', skip: '–' }[check.status] }}</span>
+                                        <div class="doctor-text">
+                                            <div class="doctor-label">{{ check.label }}</div>
+                                            <div v-if="check.detail" class="doctor-detail">{{ check.detail }}</div>
+                                            <div v-if="check.hint && check.status !== 'ok'" class="doctor-hint">{{ check.hint }}</div>
+                                        </div>
+                                        <button
+                                            v-if="check.fix && check.status !== 'ok' && canProvision"
+                                            class="btn btn-secondary btn-sm"
+                                            @click="applyDoctorFix(check.id)"
+                                        >{{ check.fix }}</button>
+                                    </li>
+                                </ul>
+
+                                <p v-if="doctorModal.report.fixable && !canProvision" class="doctor-detail">
+                                    Ask an owner or manager to apply fixes.
+                                </p>
+
+                                <div class="modal-actions">
+                                    <button class="btn btn-secondary" @click="runDoctorCheck">Check again</button>
+                                    <button
+                                        v-if="doctorModal.report.fixable > 1 && canProvision"
+                                        class="btn btn-primary"
+                                        @click="applyDoctorFix()"
+                                    >Fix all ({{ doctorModal.report.fixable }})</button>
+                                    <button v-else class="btn btn-primary" @click="doctorModal.open = false">Done</button>
                                 </div>
                             </div>
                         </div>
@@ -2324,7 +2567,7 @@ onUnmounted(() => {
 /* Sites Grid */
 .sites-grid {
   display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
     gap: var(--space-6);
 }
 
@@ -2504,7 +2747,7 @@ onUnmounted(() => {
 
 .quick-link-editor:hover {
     background: var(--color-primary);
-  color: white;
+  color: var(--text-on-primary);
 }
 
 .quick-link-site {
@@ -2514,7 +2757,7 @@ onUnmounted(() => {
 
 .quick-link-site:hover {
     background: var(--color-success);
-  color: white;
+  color: var(--text-on-success);
 }
 
 .card-actions {
@@ -3479,6 +3722,28 @@ code.info-value {
 .scan-error,
 .scan-unknown { background: var(--bg-tertiary); color: var(--text-muted); }
 
+/* ===== Site Doctor modal ===== */
+.doctor-checks { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.doctor-check {
+    display: flex; align-items: flex-start; gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-md);
+}
+.doctor-icon {
+    flex: none; width: 20px; height: 20px; border-radius: 50%;
+    display: grid; place-items: center; font-size: 12px; font-weight: var(--font-semibold);
+    background: var(--bg-tertiary); color: var(--text-muted);
+}
+.doctor-ok .doctor-icon { background: var(--color-success-subtle); color: var(--color-success); }
+.doctor-warn .doctor-icon { background: var(--color-warning-subtle); color: var(--color-warning); }
+.doctor-fail .doctor-icon { background: var(--color-danger-subtle); color: var(--color-danger); }
+.doctor-text { flex: 1; min-width: 0; }
+.doctor-label { font-size: var(--text-sm); font-weight: var(--font-medium); }
+.doctor-detail, .doctor-hint { font-size: var(--text-xs); color: var(--text-secondary); margin-top: 2px; overflow-wrap: anywhere; }
+.doctor-hint { color: var(--text-muted); }
+.doctor-check .btn-sm { flex: none; }
+
 /* ===== Scan modal ===== */
 .scan-site-name { color: var(--text-muted); font-weight: var(--font-medium); }
 .scan-modal .modal-body { max-height: 70vh; overflow-y: auto; }
@@ -3608,5 +3873,14 @@ code.info-value {
     background: var(--bg-tertiary);
     border-radius: var(--radius-full);
     padding: 2px var(--space-2);
+}
+
+@media (max-width: 767px) {
+    .page-header { flex-wrap: wrap; gap: var(--space-4); }
+    .header-actions { flex-wrap: wrap; flex-shrink: 1; }
+    .empty-state, .loading-state { padding: var(--space-6); }
+    .site-card { min-width: 0; }
+    .site-name { overflow-wrap: anywhere; }
+    .card-title-row, .card-footer, .health-bar { flex-wrap: wrap; }
 }
 </style>

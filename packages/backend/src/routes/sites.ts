@@ -8,7 +8,8 @@ import { generateWpAdmin, deleteWpAdmin, generateMagicLoginUrl, executeCommand, 
 import { runSiteScan, BUILTIN_ALLOWLIST_ENTRIES } from '../lib/securityScanner';
 import { encrypt, decrypt } from '../lib/crypto';
 import { logAudit } from '../lib/audit';
-import { requireOwner } from '../middleware/auth';
+import { requireOwner, requireRole } from '../middleware/auth';
+import { runDoctor, applyFix, DoctorReport } from '../lib/siteDoctor';
 import { runHealthCheckCycle } from '../lib/healthMonitor';
 import { 
     startRemoteContainers, 
@@ -618,6 +619,73 @@ export default async function siteRoutes(server: FastifyInstance) {
         });
 
         return result;
+    });
+
+    // ==========================================
+    // Site Doctor: health checks with one-click fixes
+    // ==========================================
+
+    // Last report per site, so the dashboard can show issue badges after a reload.
+    const doctorReports = new Map<string, DoctorReport>();
+
+    server.get('/sites/doctor', async () => [...doctorReports.values()]);
+
+    // Check every site. Runs sequentially to keep load on the Docker host low.
+    server.post('/sites/doctor', async () => {
+        const sites = await prisma.site.findMany();
+        const reports: DoctorReport[] = [];
+        for (const site of sites) {
+            try {
+                const report = await runDoctor(site);
+                doctorReports.set(site.id, report);
+                reports.push(report);
+            } catch (e: any) {
+                server.log.warn({ siteId: site.id, err: e }, 'Site Doctor check failed');
+            }
+        }
+        return reports;
+    });
+
+    server.post('/sites/:id/doctor', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const site = await prisma.site.findUnique({ where: { id } });
+        if (!site) return reply.status(404).send({ error: 'Site not found' });
+        const report = await runDoctor(site);
+        doctorReports.set(site.id, report);
+        return report;
+    });
+
+    // Apply one fix (checkId) or every available fix (no checkId), then re-check.
+    server.post('/sites/:id/doctor/fix', { preHandler: requireRole('owner', 'manager') }, async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const { checkId } = (request.body || {}) as { checkId?: string };
+        const site = await prisma.site.findUnique({ where: { id } });
+        if (!site) return reply.status(404).send({ error: 'Site not found' });
+
+        let ids: string[];
+        if (checkId) {
+            ids = [checkId];
+        } else {
+            const before = await runDoctor(site);
+            // Containers first, so the WordPress fixes have something to exec into.
+            ids = before.checks.filter(c => c.fix && c.status !== 'ok')
+                .map(c => c.id)
+                .sort((a, b) => Number(!a.startsWith('container:')) - Number(!b.startsWith('container:')));
+        }
+
+        const results: { checkId: string; success: boolean; message: string }[] = [];
+        for (const cid of ids) {
+            try {
+                results.push({ checkId: cid, success: true, message: await applyFix(site, cid) });
+            } catch (e: any) {
+                results.push({ checkId: cid, success: false, message: e.message || String(e) });
+            }
+        }
+        await logAudit(request, 'site.doctor.fix', site.id, { results });
+
+        const report = await runDoctor(site);
+        doctorReports.set(site.id, report);
+        return { results, report };
     });
 
     // Latest scan result for a site (with parsed findings).

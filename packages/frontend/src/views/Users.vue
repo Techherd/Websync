@@ -355,7 +355,7 @@ onMounted(load);
 .user-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
 
 .btn { padding: var(--space-2) var(--space-4); border-radius: var(--radius-md); font-size: var(--text-sm); font-weight: var(--font-medium); }
-.btn-primary { background: var(--color-primary); color: white; }
+.btn-primary { background: var(--color-primary); color: var(--text-on-primary); }
 .btn-primary:hover { background: var(--color-primary-hover); }
 .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); }
 .btn-secondary:hover { background: var(--border-secondary); }
@@ -369,7 +369,7 @@ onMounted(load);
 .btn-sm.btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); }
 .btn-sm.btn-secondary:hover { background: var(--border-secondary); }
 .btn-sm.btn-danger { background: var(--color-danger-subtle); color: var(--color-danger); }
-.btn-sm.btn-danger:hover { background: var(--color-danger); color: white; }
+.btn-sm.btn-danger:hover { background: var(--color-danger); color: var(--text-on-danger); }
 
 .loading-state {
     display: flex;

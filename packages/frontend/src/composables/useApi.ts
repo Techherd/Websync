@@ -135,6 +135,16 @@ export function useApi() {
 
     const getScan = (id: string) => request<any>(`/sites/${id}/scan`);
 
+    // Site Doctor: health checks with one-click fixes
+    const getDoctorReports = () => request<any[]>('/sites/doctor');
+    const runDoctorAll = () => request<any[]>('/sites/doctor', { method: 'POST' });
+    const runSiteDoctor = (id: string) => request<any>(`/sites/${id}/doctor`, { method: 'POST' });
+    const fixSiteDoctor = (id: string, checkId?: string) =>
+        request<any>(`/sites/${id}/doctor/fix`, {
+            method: 'POST',
+            body: JSON.stringify(checkId ? { checkId } : {})
+        });
+
     // Scan allowlist (global)
     const getAllowlist = () => request<any[]>('/scan-allowlist');
 
@@ -226,6 +236,10 @@ export function useApi() {
         syncSite,
         scanSite,
         getScan,
+        getDoctorReports,
+        runDoctorAll,
+        runSiteDoctor,
+        fixSiteDoctor,
         getAllowlist,
         addAllowlist,
         removeAllowlist,

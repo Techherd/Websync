@@ -48,6 +48,26 @@ export const executeCommand = async (containerName: string, cmd: string[]): Prom
 const WEBSYNC_ADMIN_USERNAME = 'websync_admin';
 
 /**
+ * WP-CLI runs as root (`--allow-root`), so any folder it creates — the
+ * uploads/YYYY/MM tree during `wp core install`, the wp-cli-login-server
+ * plugin — ends up owned by root, and Apache (www-data) can't write to it:
+ * media uploads fail with "could not be moved to wp-content/uploads/...".
+ * Hand those paths back to www-data. Only touches entries not already owned
+ * by www-data, so it's cheap on large uploads folders.
+ */
+export const fixWpContentOwnership = async (
+    containerName: string,
+    wpPath: string = '/var/www/html'
+): Promise<string> => {
+    const targets = ['wp-content/uploads', 'wp-content/plugins/wp-cli-login-server']
+        .map(t => `${wpPath}/${t}`).join(' ');
+    return executeCommand(containerName, [
+        'sh', '-c',
+        `for t in ${targets}; do [ -e "$t" ] && find "$t" ! -user www-data -exec chown www-data:www-data {} + ; done; echo done`
+    ]);
+};
+
+/**
  * Create or rotate the persistent WordPress admin user managed by WebSync.
  * Idempotent: uses a stable `websync_admin` user across calls and resets its
  * password on each invocation. Caller is responsible for persisting the
@@ -179,7 +199,7 @@ const filterPhpNoise = (output: string): string =>
 // Shell expression (not JS-interpolated) for WP-CLI's community packages dir.
 const WP_CLI_PACKAGES_DIR = '"${WP_CLI_PACKAGES_DIR:-$HOME/.wp-cli/packages}"';
 
-const isBrokenPackagesOutput = (output: string): boolean =>
+export const isBrokenPackagesOutput = (output: string): boolean =>
     /fatal error/i.test(output) && output.includes('.wp-cli/packages');
 
 /**
@@ -219,7 +239,7 @@ export const findWpCli = async (containerName: string, wpPath: string): Promise<
     return wpCli;
 };
 
-const locateWpCli = async (containerName: string, wpPath: string): Promise<string | null> => {
+export const locateWpCli = async (containerName: string, wpPath: string): Promise<string | null> => {
     try {
         const which = (await executeCommand(containerName, ['sh', '-c', 'which wp 2>/dev/null || echo ""'])).trim();
         if (which) return which;
@@ -297,6 +317,7 @@ export const generateMagicLoginUrl = async (
                 `cd ${wpPath} && ${wpCli} login install --activate --yes --allow-root 2>&1`
             ]);
             logs.push(`login install: ${installCmd}`);
+            await fixWpContentOwnership(containerName, wpPath).catch(() => {});
         }
 
         const magic = await executeCommand(containerName, [
@@ -402,6 +423,7 @@ export const setupMagicLogin = async (
         `cd ${wpPath} && ${wpCli} login install --activate --yes --allow-root 2>&1`,
         pluginActive
     ));
+    await fixWpContentOwnership(containerName, wpPath).catch(() => {});
     // Write the wp_cli_login option.
     //
     // The companion plugin stores its config as a JSON *string* (it calls

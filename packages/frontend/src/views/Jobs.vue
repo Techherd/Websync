@@ -10,6 +10,10 @@ const { getJobs } = useApi();
 const jobs = ref<any[]>([]);
 const total = ref(0);
 const loading = ref(true);
+const loadError = ref('');
+const loaded = ref(false);
+const loadedQuery = ref('');
+let loadVersion = 0;
 const filter = ref<'all' | 'RUNNING' | 'COMPLETED' | 'FAILED'>('all');
 const page = ref(1);
 const limit = 20;
@@ -17,19 +21,25 @@ const limit = 20;
 const runningJobs = ref<Map<string, { progress: number; message: string }>>(new Map());
 
 const loadJobs = async () => {
+    const version = ++loadVersion;
+    const query = `${filter.value}:${page.value}`;
     loading.value = true;
+    loadError.value = '';
     try {
         const params: any = { limit, offset: (page.value - 1) * limit };
         if (filter.value !== 'all') {
             params.status = filter.value;
         }
         const data = await getJobs(params);
+        if (version !== loadVersion) return;
+        loaded.value = true;
+        loadedQuery.value = query;
         jobs.value = data.jobs;
         total.value = data.total;
-    } catch (e) {
-        console.error('Failed to load jobs:', e);
+    } catch (e: any) {
+        if (version === loadVersion) loadError.value = e.message || 'Please try again.';
     } finally {
-        loading.value = false;
+        if (version === loadVersion) loading.value = false;
     }
 };
 
@@ -83,7 +93,7 @@ onMounted(loadJobs);
         <div class="page-header">
             <div class="header-info">
                 <h2 class="section-title">Job History</h2>
-                <p class="section-subtitle">{{ total }} total jobs</p>
+                <p class="section-subtitle">{{ loaded ? `${total} total jobs` : 'Job history' }}</p>
             </div>
             <div class="header-actions">
                 <div class="filter-group">
@@ -111,9 +121,15 @@ onMounted(loadJobs);
             </div>
         </div>
 
+        <div v-if="loadError" class="load-notice" role="alert">
+            <p>Could not load jobs. {{ loadError }}</p>
+            <p v-if="loaded">Showing previously loaded results; they may be out of date or from a different filter/page.</p>
+            <button @click="loadJobs" :disabled="loading">{{ loading ? 'Retrying…' : 'Retry' }}</button>
+        </div>
+        <p v-else-if="loaded && loadedQuery !== `${filter}:${page}`" role="status">Loading selected results; previous results remain below.</p>
         <!-- Jobs Table -->
         <div class="jobs-table-container">
-            <div v-if="loading" class="loading-state">
+            <div v-if="loading && !loaded" class="loading-state" role="status">
                 <div class="spinner"></div>
                 <span>Loading jobs...</span>
             </div>
@@ -152,12 +168,12 @@ onMounted(loadJobs);
                 </tbody>
             </table>
 
-            <div v-else class="empty-state">
+            <div v-else-if="loaded && !loadError" class="empty-state">
                 <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <circle cx="12" cy="12" r="10"/>
                     <polyline points="12 6 12 12 16 14"/>
                 </svg>
-                <h3>No jobs found</h3>
+                <h3>{{ filter === 'all' ? 'No job history yet' : 'No matching jobs' }}</h3>
                 <p>Jobs will appear here when you trigger syncs</p>
             </div>
         </div>
@@ -238,14 +254,14 @@ onMounted(loadJobs);
 
 .filter-btn.active {
     background: var(--color-primary);
-    color: white;
+    color: var(--text-on-primary);
 }
 
 .jobs-table-container {
     background: var(--bg-primary);
     border-radius: var(--radius-xl);
     border: 1px solid var(--border-primary);
-    overflow: hidden;
+    overflow-x: auto;
 }
 
 .loading-state {
@@ -389,4 +405,5 @@ onMounted(loadJobs);
     font-size: var(--text-sm);
     color: var(--text-muted);
 }
+@media (max-width: 600px) { .filter-group, .pagination { flex-wrap: wrap; } .filter-btn { padding: var(--space-2); } }
 </style>

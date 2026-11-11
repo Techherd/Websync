@@ -5,21 +5,21 @@
    ============================================ */
 :root {
     /* Color Palette */
-    --color-primary: #0891b2;
-    --color-primary-hover: #0e7490;
+    --color-primary: #0e7490;
+    --color-primary-hover: #155e75;
     --color-primary-light: #22d3ee;
     --color-primary-subtle: rgba(8, 145, 178, 0.1);
     
-    --color-success: #10b981;
-    --color-success-hover: #059669;
+    --color-success: #047857;
+    --color-success-hover: #065f46;
     --color-success-subtle: rgba(16, 185, 129, 0.1);
     
-    --color-warning: #f59e0b;
-    --color-warning-hover: #d97706;
+    --color-warning: #92400e;
+    --color-warning-hover: #78350f;
     --color-warning-subtle: rgba(245, 158, 11, 0.1);
     
-    --color-danger: #ef4444;
-    --color-danger-hover: #dc2626;
+    --color-danger: #b91c1c;
+    --color-danger-hover: #991b1b;
     --color-danger-subtle: rgba(239, 68, 68, 0.1);
     
     /* Background Colors */
@@ -32,10 +32,11 @@
     /* Text Colors */
     --text-primary: #0f172a;
     --text-secondary: #475569;
-    --text-muted: #94a3b8;
+    --text-muted: #475569;
     --text-inverse: #ffffff;
     --text-on-primary: #ffffff;  /* Text color on primary buttons */
     --text-on-success: #ffffff;  /* Text color on success buttons */
+    --text-on-warning: #ffffff;
     --text-on-danger: #ffffff;   /* Text color on danger buttons */
     
     /* Border Colors */
@@ -118,7 +119,7 @@
     --color-warning-hover: #fcd34d;
     --color-warning-subtle: rgba(251, 191, 36, 0.15);
     
-    --color-danger: #f87171;
+    --color-danger: #fca5a5;
     --color-danger-hover: #fca5a5;
     --color-danger-subtle: rgba(248, 113, 113, 0.15);
     
@@ -129,11 +130,12 @@
     --bg-overlay: rgba(0, 0, 0, 0.7);
     
     --text-primary: #f1f5f9;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
+    --text-secondary: #cbd5e1;
+    --text-muted: #cbd5e1;
     --text-inverse: #0f172a;
     --text-on-primary: #0f172a;  /* Dark text on bright primary in dark mode */
     --text-on-success: #0f172a;  /* Dark text on bright success in dark mode */
+    --text-on-warning: #0f172a;
     --text-on-danger: #0f172a;   /* Dark text on bright danger in dark mode */
     
     --border-primary: #334155;
@@ -310,4 +312,12 @@ input, select, textarea {
 
 ::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
+}
+
+/* Shared recovery notices and keyboard feedback. */
+.load-notice { padding: var(--space-4); margin-bottom: var(--space-4); border: 1px solid var(--border-secondary); border-radius: var(--radius-lg); background: var(--bg-elevated); color: var(--text-primary); overflow-wrap: anywhere; }
+.load-notice button { margin-top: var(--space-2); padding: var(--space-2) var(--space-4); border: 1px solid var(--border-secondary); border-radius: var(--radius-md); color: var(--text-primary); }
+:where(button, a, input, select, textarea):focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
