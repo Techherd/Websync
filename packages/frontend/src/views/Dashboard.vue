@@ -7,6 +7,7 @@ import StatusBadge from '../components/StatusBadge.vue';
 import SyncProgress from '../components/SyncProgress.vue';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
 import NewSiteWizard from '../components/NewSiteWizard.vue';
+import ChangeUrlDialog from '../components/ChangeUrlDialog.vue';
 
 interface Site {
   id: string;
@@ -153,6 +154,19 @@ const canDelete = computed(() => userRole.value === 'owner');
 
 // New Site wizard
 const showWizard = ref(false);
+const changeUrlSite = ref<Site | null>(null);
+const onUrlChanged = async (_siteId: string, newUrl: string) => {
+    success('Address changed', `Now at ${newUrl}`);
+    await loadData();
+};
+const openChangeUrl = (site: Site) => {
+    if (showModal.value) {
+        // Unsaved edits: ask to discard first (the user can click again afterwards).
+        if (isFormDirty()) return closeModal();
+        showModal.value = false;
+    }
+    changeUrlSite.value = site;
+};
 const onSiteProvisioned = async () => {
     await loadData();
 };
@@ -1373,6 +1387,12 @@ onUnmounted(() => {
         </div>
       </div>
                     <div class="card-actions">
+                        <button v-if="canProvision" class="icon-btn" @click="openChangeUrl(site)" title="Change address" aria-label="Change address">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                            </svg>
+                        </button>
                         <button class="icon-btn" @click="openEditModal(site)" title="Edit">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -1723,7 +1743,11 @@ onUnmounted(() => {
                                 <div class="form-group">
                                     <label class="form-label">Site URL</label>
                                     <input v-model="formData.siteUrl" type="url" class="form-input" placeholder="https://domain.com" />
-                                    <p class="form-hint">Live website URL</p>
+                                    <p class="form-hint">
+                                        Live website URL. This only changes WebSync's link<template v-if="editingId && canProvision">; to move the site,
+                                        <button type="button" class="link-btn" @click="openChangeUrl(sites.find(x => x.id === editingId)!)">change its address</button>
+                                        instead (updates WordPress and the tunnel)</template>.
+                                    </p>
                                 </div>
                             </div>
 
@@ -1839,6 +1863,7 @@ onUnmounted(() => {
 
         <!-- New Site wizard -->
         <NewSiteWizard :open="showWizard" @close="showWizard = false" @created="onSiteProvisioned" />
+        <ChangeUrlDialog :open="!!changeUrlSite" :site="changeUrlSite" @close="changeUrlSite = null" @changed="onUrlChanged" />
 
         <!-- Delete Confirmation -->
         <ConfirmDialog
@@ -3882,5 +3907,13 @@ code.info-value {
     .site-card { min-width: 0; }
     .site-name { overflow-wrap: anywhere; }
     .card-title-row, .card-footer, .health-bar { flex-wrap: wrap; }
+}
+
+.link-btn {
+    color: var(--color-primary);
+    text-decoration: underline;
+    font-size: inherit;
+    padding: 0;
+    background: none;
 }
 </style>

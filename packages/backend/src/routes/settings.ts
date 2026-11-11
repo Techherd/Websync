@@ -3,6 +3,8 @@ import { z } from 'zod';
 import prisma from '../lib/prisma';
 import crypto from 'crypto';
 import { requireOwner } from '../middleware/auth';
+import { encrypt } from '../lib/crypto';
+import { getCloudflareConfig, testCloudflare } from '../lib/cloudflare';
 
 const SettingsSchema = z.object({
     // Server identity
@@ -34,7 +36,18 @@ const SettingsSchema = z.object({
     provisionHostIp: z.string().nullish(),
     wordpressImage: z.string().min(1).optional(),
     staticImage: z.string().min(1).optional(),
+
+    // Cloudflare Tunnel. Token: omit to keep the stored one, '' to clear it.
+    cloudflareApiToken: z.string().trim().optional(),
+    cloudflareAccountId: z.string().trim().regex(/^[a-f0-9]{32}$/i, 'Cloudflare account ID is a 32-character hex string').nullish().or(z.literal('')),
+    cloudflareTunnelId: z.string().trim().regex(/^[0-9a-f-]{36}$/i, 'Tunnel ID looks like 6ff42ae2-765d-4adf-8112-31c55c1551ef').nullish().or(z.literal('')),
 });
+
+/** Settings as sent to the browser: never include the Cloudflare token itself. */
+const publicSettings = <T extends { cloudflareApiToken?: string | null }>(s: T) => {
+    const { cloudflareApiToken, ...rest } = s;
+    return { ...rest, cloudflareApiTokenSet: !!cloudflareApiToken };
+};
 
 // Generate a secure token for API communication between servers
 const generateApiToken = () => crypto.randomBytes(32).toString('hex');
@@ -63,7 +76,7 @@ export default async function settingsRoutes(server: FastifyInstance) {
             };
         }
         
-        return settings;
+        return publicSettings(settings);
     });
 
     // Update settings (creates if doesn't exist)
@@ -89,6 +102,9 @@ export default async function settingsRoutes(server: FastifyInstance) {
                 provisionHostIp: body.provisionHostIp === undefined ? undefined : (body.provisionHostIp || null),
                 wordpressImage: body.wordpressImage,
                 staticImage: body.staticImage,
+                cloudflareApiToken: body.cloudflareApiToken === undefined ? undefined : (body.cloudflareApiToken ? encrypt(body.cloudflareApiToken) : null),
+                cloudflareAccountId: body.cloudflareAccountId === undefined ? undefined : (body.cloudflareAccountId || null),
+                cloudflareTunnelId: body.cloudflareTunnelId === undefined ? undefined : (body.cloudflareTunnelId || null),
             },
             create: {
                 id: 'default',
@@ -108,10 +124,25 @@ export default async function settingsRoutes(server: FastifyInstance) {
                 provisionHostIp: body.provisionHostIp === undefined ? undefined : (body.provisionHostIp || null),
                 wordpressImage: body.wordpressImage,
                 staticImage: body.staticImage,
+                cloudflareApiToken: body.cloudflareApiToken === undefined ? undefined : (body.cloudflareApiToken ? encrypt(body.cloudflareApiToken) : null),
+                cloudflareAccountId: body.cloudflareAccountId === undefined ? undefined : (body.cloudflareAccountId || null),
+                cloudflareTunnelId: body.cloudflareTunnelId === undefined ? undefined : (body.cloudflareTunnelId || null),
             }
         });
         
-        return settings;
+        return publicSettings(settings);
+    });
+
+    // Check the Cloudflare token, account and tunnel
+    server.post('/settings/cloudflare/test', { preHandler: requireOwner }, async () => {
+        try {
+            const cfg = await getCloudflareConfig();
+            if (!cfg) return { success: false, error: 'Save an API token, account ID and tunnel ID first.' };
+            const { tunnel, routes, warning } = await testCloudflare(cfg);
+            return { success: !warning, tunnel: tunnel.name, status: tunnel.status, routes, error: warning };
+        } catch (e: any) {
+            return { success: false, error: e.message };
+        }
     });
 
     // Generate a new API token for this server

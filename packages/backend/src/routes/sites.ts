@@ -11,6 +11,7 @@ import { logAudit } from '../lib/audit';
 import { requireOwner, requireRole } from '../middleware/auth';
 import { runDoctor, applyFix, DoctorReport } from '../lib/siteDoctor';
 import { runHealthCheckCycle } from '../lib/healthMonitor';
+import { planUrlChange, runUrlChange } from '../lib/urlChange';
 import { 
     startRemoteContainers, 
     stopRemoteContainers, 
@@ -686,6 +687,74 @@ export default async function siteRoutes(server: FastifyInstance) {
         const report = await runDoctor(site);
         doctorReports.set(site.id, report);
         return { results, report };
+    });
+
+    // ==========================================
+    // Change a site's address (WordPress DB + Cloudflare Tunnel + DNS)
+    // ==========================================
+
+    const UrlChangeSchema = z.object({
+        newUrl: z.string().trim().min(1, 'Enter the new address'),
+        cloudflare: z.boolean().default(false),
+        keepOld: z.boolean().default(true),
+        service: z.string().trim().max(500).nullish()
+    });
+    const canChangeUrl = requireRole('owner', 'manager');
+
+    // Dry run: what would change, and anything blocking it
+    server.post('/sites/:id/change-url/preflight', { preHandler: canChangeUrl }, async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const parsed = UrlChangeSchema.safeParse(request.body);
+        if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues[0]?.message || 'Invalid input' });
+        const site = await prisma.site.findUnique({ where: { id } });
+        if (!site) return reply.status(404).send({ error: 'Site not found' });
+
+        const { checks, plan } = await planUrlChange(site, parsed.data);
+        return {
+            ok: !!plan && checks.every(c => c.status !== 'fail'),
+            checks,
+            plan: plan && {
+                oldUrl: plan.oldUrl,
+                newUrl: plan.newUrl,
+                wordpress: !!plan.wp,
+                replacements: plan.replacements.length,
+                cloudflare: plan.cf && {
+                    newHost: plan.cf.newHost,
+                    oldHost: plan.cf.oldHost,
+                    service: plan.cf.service,
+                    zone: plan.cf.zoneName,
+                    createDns: plan.cf.createDns
+                }
+            }
+        };
+    });
+
+    // Start the change in the background; progress arrives over the WebSocket
+    server.post('/sites/:id/change-url', { preHandler: canChangeUrl }, async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const parsed = UrlChangeSchema.safeParse(request.body);
+        if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues[0]?.message || 'Invalid input' });
+        const site = await prisma.site.findUnique({ where: { id } });
+        if (!site) return reply.status(404).send({ error: 'Site not found' });
+
+        const { checks, plan } = await planUrlChange(site, parsed.data);
+        const failed = checks.filter(c => c.status === 'fail');
+        if (!plan || failed.length) {
+            return reply.status(409).send({ error: failed.map(c => c.detail || c.label).join(' '), checks });
+        }
+
+        const job = await prisma.job.create({
+            data: { siteId: site.id, type: 'CHANGE_URL', status: 'RUNNING', progress: 0, label: site.label }
+        });
+        broadcastJobUpdate({ type: 'job:started', job });
+        await logAudit(request, 'site.changeUrl', site.id, {
+            jobId: job.id, from: plan.oldUrl, to: plan.newUrl,
+            cloudflare: plan.cf ? { newHost: plan.cf.newHost, oldHost: plan.cf.oldHost, service: plan.cf.service } : null,
+            keepOld: plan.keepOld
+        });
+
+        runUrlChange(site, plan, job.id).catch(err => server.log.error({ err, siteId: site.id }, 'URL change failed unexpectedly'));
+        return { jobId: job.id };
     });
 
     // Latest scan result for a site (with parsed findings).

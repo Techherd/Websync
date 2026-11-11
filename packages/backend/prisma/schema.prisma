@@ -228,6 +228,11 @@ model Settings {
   provisionHostIp       String?                 // LAN IP used for default site URLs (e.g. 192.168.1.161)
   wordpressImage        String @default("althe3rd/wordpress-with-cli:latest")
   staticImage           String @default("nginx:alpine")
+
+  // Cloudflare Tunnel (used when a site's address changes)
+  cloudflareApiToken    String?  // encrypted (lib/crypto.ts); needs Tunnel:Edit, DNS:Edit, Zone:Read
+  cloudflareAccountId   String?
+  cloudflareTunnelId    String?
   
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt

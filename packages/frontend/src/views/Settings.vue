@@ -24,6 +24,10 @@ interface Settings {
     provisionHostIp: string;
     wordpressImage: string;
     staticImage: string;
+    // Cloudflare Tunnel
+    cloudflareAccountId: string;
+    cloudflareTunnelId: string;
+    cloudflareApiTokenSet: boolean;
 }
 
 interface HealthStatus {
@@ -64,8 +68,15 @@ const settings = ref<Settings>({
     provisionWebPortStart: 8100,
     provisionHostIp: '',
     wordpressImage: 'althe3rd/wordpress-with-cli:latest',
-    staticImage: 'nginx:alpine'
+    staticImage: 'nginx:alpine',
+    cloudflareAccountId: '',
+    cloudflareTunnelId: '',
+    cloudflareApiTokenSet: false
 });
+// Only sent when typed; the stored token is never shown.
+const cloudflareTokenInput = ref('');
+const clearCloudflareToken = ref(false);
+const testingCloudflare = ref(false);
 const configured = ref(false);
 const remoteHealth = ref<HealthStatus>({
     healthy: false,
@@ -110,7 +121,10 @@ const loadSettings = async () => {
                 provisionWebPortStart: data.provisionWebPortStart || 8100,
                 provisionHostIp: data.provisionHostIp || '',
                 wordpressImage: data.wordpressImage || 'althe3rd/wordpress-with-cli:latest',
-                staticImage: data.staticImage || 'nginx:alpine'
+                staticImage: data.staticImage || 'nginx:alpine',
+                cloudflareAccountId: data.cloudflareAccountId || '',
+                cloudflareTunnelId: data.cloudflareTunnelId || '',
+                cloudflareApiTokenSet: !!data.cloudflareApiTokenSet
             };
             configured.value = !!data.remoteHost;
         }
@@ -196,8 +210,17 @@ const handleSubmit = async () => {
             provisionWebPortStart: settings.value.provisionWebPortStart,
             provisionHostIp: settings.value.provisionHostIp || null,
             wordpressImage: settings.value.wordpressImage,
-            staticImage: settings.value.staticImage
+            staticImage: settings.value.staticImage,
+            cloudflareAccountId: settings.value.cloudflareAccountId.trim() || null,
+            cloudflareTunnelId: settings.value.cloudflareTunnelId.trim() || null,
+            cloudflareApiToken: cloudflareTokenInput.value.trim()
+                ? cloudflareTokenInput.value.trim()
+                : (clearCloudflareToken.value ? '' : undefined)
         });
+        if (cloudflareTokenInput.value.trim()) settings.value.cloudflareApiTokenSet = true;
+        if (clearCloudflareToken.value && !cloudflareTokenInput.value.trim()) settings.value.cloudflareApiTokenSet = false;
+        cloudflareTokenInput.value = '';
+        clearCloudflareToken.value = false;
         configured.value = true;
         success('Settings Saved', 'Configuration updated successfully');
         
@@ -212,6 +235,22 @@ const handleSubmit = async () => {
         error('Save Failed', e.message || 'Failed to save settings');
     } finally {
         saving.value = false;
+    }
+};
+
+const testCloudflare = async () => {
+    testingCloudflare.value = true;
+    try {
+        const r = await request<{ success: boolean; tunnel?: string; status?: string; routes?: number; error?: string }>('/settings/cloudflare/test', 'POST');
+        if (r.success) {
+            success('Cloudflare connected', `Tunnel "${r.tunnel}" is ${r.status}, with ${r.routes} hostname route(s).`);
+        } else {
+            error('Cloudflare check failed', r.error || 'Unknown error');
+        }
+    } catch (e: any) {
+        error('Cloudflare check failed', e.message);
+    } finally {
+        testingCloudflare.value = false;
     }
 };
 
@@ -610,6 +649,51 @@ onUnmounted(() => {
                     <div class="form-group">
                         <label class="form-label" for="staticImage">Static site image</label>
                         <input id="staticImage" v-model="settings.staticImage" type="text" class="form-input mono" />
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cloudflare Tunnel -->
+            <div class="form-section">
+                <div class="section-header">
+                    <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+                    </svg>
+                    <div>
+                        <h3>Cloudflare Tunnel</h3>
+                        <p>Lets WebSync add tunnel routes and DNS records when a site's address changes</p>
+                    </div>
+                </div>
+
+                <div class="form-grid">
+                    <div class="form-group full-width">
+                        <label class="form-label" for="cloudflareApiToken">API token</label>
+                        <input id="cloudflareApiToken" v-model="cloudflareTokenInput" type="password" class="form-input mono" autocomplete="off"
+                            :placeholder="settings.cloudflareApiTokenSet ? 'Saved. Enter a new token to replace it' : 'Paste an API token'" />
+                        <p class="form-hint">
+                            Create one under My Profile → API Tokens with <strong>Account · Cloudflare Tunnel · Edit</strong>,
+                            <strong>Zone · DNS · Edit</strong> and <strong>Zone · Zone · Read</strong>. Stored encrypted.
+                            <label v-if="settings.cloudflareApiTokenSet && isOwner" class="inline-check">
+                                <input type="checkbox" v-model="clearCloudflareToken" /> Remove the saved token
+                            </label>
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="cloudflareAccountId">Account ID</label>
+                        <input id="cloudflareAccountId" v-model="settings.cloudflareAccountId" type="text" class="form-input mono" placeholder="32 hex characters" />
+                        <p class="form-hint">On any domain's Overview page in Cloudflare</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="cloudflareTunnelId">Tunnel ID</label>
+                        <input id="cloudflareTunnelId" v-model="settings.cloudflareTunnelId" type="text" class="form-input mono" placeholder="6ff42ae2-765d-4adf-8112-31c55c1551ef" />
+                        <p class="form-hint">Zero Trust → Networks → Tunnels. The tunnel must be managed from the dashboard, not a local config.yml.</p>
+                    </div>
+                    <div class="form-group full-width">
+                        <button type="button" class="btn btn-secondary btn-fit" :disabled="testingCloudflare || !isOwner" @click="testCloudflare">
+                            <span v-if="testingCloudflare" class="spinner-sm"></span>
+                            <span>{{ testingCloudflare ? 'Checking…' : 'Test connection' }}</span>
+                        </button>
+                        <p class="form-hint">Tests the saved values. Save first if you changed them.</p>
                     </div>
                 </div>
             </div>
@@ -1200,5 +1284,17 @@ onUnmounted(() => {
     .settings-header {
         flex-direction: column;
     }
+}
+
+.inline-check {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: var(--space-2);
+    cursor: pointer;
+}
+
+.btn-fit {
+    align-self: flex-start;
 }
 </style>
